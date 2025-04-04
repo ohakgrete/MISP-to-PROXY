@@ -1,6 +1,6 @@
  # MISP + Pi-hole Installation Guide
  
- This README provides step-by-step instructions for installing both **MISP** (Malware Information Sharing Platform) and **Pi-hole** on a Debian-based system (tested on Debian 12). The process uses the official installation scripts from each project’s GitHub repository.
+ This README provides step-by-step instructions for installing both **MISP** (Malware Information Sharing Platform) and **Pi-hole** on a Ubuntu-based system (tested on Ubuntu 24.04). The process uses the official installation scripts from each project’s GitHub repository.
  
  ---
  
