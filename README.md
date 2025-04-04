@@ -66,8 +66,6 @@ Go chek if its in the Pihole WebGUI
    [https://github.com/MISP/MISP](https://github.com/MISP/MISP)
  - **Pi-hole Documentation**:  
    [https://github.com/pi-hole/pi-hole](https://github.com/pi-hole/pi-hole)
- - **Official MISP Debian 12 Install Script**:  
-   [https://github.com/MISP/MISP/blob/2.5/INSTALL/INSTALL.debian12.sh](https://github.com/MISP/MISP/blob/2.5/INSTALL/INSTALL.debian12.sh)
  - **Pi-hole Basic Install Script**:  
    [https://github.com/pi-hole/pi-hole/blob/master/automated%20install/basic-install.sh](https://github.com/pi-hole/pi-hole/blob/master/automated%20install/basic-install.sh)
  ```
