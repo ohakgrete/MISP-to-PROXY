@@ -1,0 +1,104 @@
+#!/usr/bin/env python3
+
+import requests
+import sqlite3
+import os
+import urllib3
+from datetime import datetime
+
+# ==== CONFIG ====
+MISP_URL = "https://misp.local"
+MISP_API_KEY = "Need to generate API key from MISP"  # Replace with your actual key
+PIHOLE_DB_PATH = "/etc/pihole/gravity.db"
+COMMENT_TAG = "Synced from MISP"
+GROUP_ID = 1   # Default Pi-hole group
+TYPE = 1       # Exact blacklist
+
+# ==== INIT ====
+urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+HEADERS = {
+    "Authorization": MISP_API_KEY,
+    "Accept": "application/json",
+    "Content-Type": "application/json"
+}
+
+# ==== QUERY MISP ====
+def fetch_domains_from_misp():
+    payload = {
+        "returnFormat": "json",
+        "type": ["domain", "hostname"],
+        "deleted": False
+    }
+
+    print("[*] Requesting domain data from MISP...")
+    try:
+        response = requests.post(f"{MISP_URL}/attributes/restSearch",
+                                 headers=HEADERS, json=payload, verify=False)
+        response.raise_for_status()
+        data = response.json()
+
+        # Extract attributes
+        attributes = []
+        if "Attribute" in data:
+            attributes = data["Attribute"]
+        elif "response" in data and isinstance(data["response"], dict):
+            attributes = data["response"].get("Attribute", [])
+
+        domains = [attr["value"] for attr in attributes if attr.get("type") in ("domain", "hostname")]
+        print(f"[+] Retrieved {len(domains)} domain(s).")
+        return list(set(domains))  # Deduplicate
+
+    except Exception as e:
+        print(f"[!] Error querying MISP: {e}")
+        return []
+
+# ==== INSERT INTO PIHOLE ====
+def insert_into_pihole(domains):
+    if not os.path.exists(PIHOLE_DB_PATH):
+        print(f"[!] Pi-hole database not found at {PIHOLE_DB_PATH}")
+        return
+
+    conn = sqlite3.connect(PIHOLE_DB_PATH)
+    cursor = conn.cursor()
+
+    # Check if 'group_id' column exists
+    cursor.execute("PRAGMA table_info(domainlist);")
+    columns = [row[1] for row in cursor.fetchall()]
+    has_group_id = 'group_id' in columns
+
+    added = 0
+    for domain in domains:
+        try:
+            if has_group_id:
+                cursor.execute(
+                    "INSERT OR IGNORE INTO domainlist (type, domain, enabled, comment, group_id) VALUES (?, ?, 1, ?, ?)",
+                    (TYPE, domain, COMMENT_TAG, GROUP_ID)
+                )
+            else:
+                cursor.execute(
+                    "INSERT OR IGNORE INTO domainlist (type, domain, enabled, comment) VALUES (?, ?, 1, ?)",
+                    (TYPE, domain, COMMENT_TAG)
+                )
+            added += cursor.rowcount
+        except Exception as e:
+            print(f"[!] Failed to insert {domain}: {e}")
+
+    conn.commit()
+    conn.close()
+    print(f"[+] Successfully added {added} new domain(s) to Pi-hole.")
+
+
+# ==== MAIN ====
+def main():
+    print("===== MISP to Pi-hole Sync =====")
+    domains = fetch_domains_from_misp()
+    if domains:
+        insert_into_pihole(domains)
+        print("[*] Reloading Pi-hole DNS...")
+        os.system("pihole restartdns reload-lists")
+        print("[+] Sync complete.")
+    else:
+        print("[!] No domains to process.")
+
+if __name__ == "__main__":
+    main()
