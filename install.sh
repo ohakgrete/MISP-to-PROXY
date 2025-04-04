@@ -1,65 +1,53 @@
 #!/bin/bash
-# Script to install MISP and Pi-hole on Ubuntu
-# Pi-hole will run on port 8080 using lighttpd
-# MISP will run on HTTPS port 443 using Apache2 (installed by MISP's own script)
 
-set +e  # Continue even if some commands fail
+set -e
 
-BLUE="\033[1;34m"
-NC="\033[0m"
+### CONFIGURATION ###
+MISP_DIR="/var/www/MISP"
+PIHOLE_WEB_PORT=8080
 
-print_status() {
-  echo -e "${BLUE}[STATUS]${NC} $1"
-}
-
-#########################
-# System Update
-#########################
-print_status "Updating system packages..."
+echo "[+] Updating system..."
 sudo apt update && sudo apt upgrade -y
 
-#########################
-# Install Required Packages
-#########################
-print_status "Installing required packages (curl, git, lighttpd)..."
-sudo apt install -y curl git lighttpd
+### STEP 1: INSTALL MISP ###
+echo "[+] Installing dependencies for MISP..."
+sudo apt install -y curl git
 
-#########################
-# Install Pi-hole
-#########################
-print_status "Installing Pi-hole..."
-curl -sSL https://install.pi-hole.net | bash /dev/stdin --unattended
+echo "[+] Installing MISP "
+wget https://raw.githubusercontent.com/MISP/MISP/refs/heads/2.5/INSTALL/INSTALL.ubuntu2404.sh
 
-#########################
-# Configure lighttpd to use port 8080
-#########################
-print_status "Reconfiguring lighttpd to use port 8080..."
-sudo sed -i 's/server.port *=.*/server.port = 8080/' /etc/lighttpd/lighttpd.conf
-sudo systemctl restart lighttpd
+echo "[+] Running MISP install script (Ubuntu 24.04 supported as 22.04)..."
+sudo chmod +x INSTALL.ubuntu2404.sh
+sudo bash INSTALL.ubuntu2404.sh -c
 
-#########################
-# Install MISP
-#########################
-print_status "Cloning MISP repository..."
-sudo git clone https://github.com/MISP/MISP.git /var/www/MISP
-cd /var/www/MISP || exit
-print_status "Pulling latest updates from MISP repository..."
-sudo git pull
+echo "[✔] MISP installation complete and running on default ports 80/443"
 
-print_status "Running MISP installer..."
-cd /var/www/MISP/INSTALL || exit
-sudo ./INSTALL.ubuntu2404.sh
+### ADD misp.local TO HOSTS ###
+if ! grep -q "misp.local" /etc/hosts; then
+  echo "[+] Adding misp.local to /etc/hosts..."
+  echo "127.0.0.1 misp.local" | sudo tee -a /etc/hosts
+else
+  echo "[i] misp.local already exists in /etc/hosts"
+fi
+### STEP 2: INSTALL PIHOLE ###
+echo "[+] Installing Pi-hole..."
 
-#########################
-# Add MISP hostname to /etc/hosts
-#########################
-MISP_DOMAIN="misp.local"
-print_status "Adding ${MISP_DOMAIN} to /etc/hosts"
-echo "127.0.0.1 ${MISP_DOMAIN}" | sudo tee -a /etc/hosts
+# Install Pi-hole unattended
+curl -sSL https://install.pi-hole.net | sudo bash /dev/stdin --unattended
 
-#########################
-# Done
-#########################
-print_status "Installation complete."
-echo "- MISP available at: https://${MISP_DOMAIN}"
-echo "- Pi-hole available at: http://<your-ip>:8080/admin"
+echo "[+] Pi-hole installed. Reconfiguring lighttpd to use misp.local:${PIHOLE_WEB_PORT}..."
+
+# Path to the Pi-hole TOML config
+PIHOLE_TOML="/etc/pihole/pihole.toml"
+PORT_LINE='port = "8080o,8443os,[::]:8080o,[::]:8443os"'
+
+if grep -E '^[[:space:]]*(#\s*)?port\s*=' "$PIHOLE_TOML" > /dev/null; then
+  sudo sed -E -i "s|^[[:space:]]*(#\s*)?port\s*=.*|$PORT_LINE|" "$PIHOLE_TOML"
+else
+  echo "$PORT_LINE" | sudo tee -a "$PIHOLE_TOML"
+fi
+
+sudo systemctl restart pihole-FTL
+
+echo "[✔] Pi-hole is now accessible at http://misp.local:${PIHOLE_WEB_PORT}/admin"
+echo "[✔] MISP is running on https://misp.local/"
