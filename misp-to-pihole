@@ -44,7 +44,12 @@ def fetch_domains_from_misp():
         elif "response" in data and isinstance(data["response"], dict):
             attributes = data["response"].get("Attribute", [])
 
-        domains = [attr["value"] for attr in attributes if attr.get("type") in ("domain", "hostname")]
+        domains = [
+            attr["value"]
+            for attr in attributes
+             if attr.get("type") in ("domain", "hostname") and attr.get("to_ids", True) is True
+        ]
+
         print(f"[+] Retrieved {len(domains)} domain(s).")
         return list(set(domains))  # Deduplicate
 
@@ -95,7 +100,7 @@ def main():
     if domains:
         insert_into_pihole(domains)
         print("[*] Reloading Pi-hole DNS...")
-        os.system("pihole restartdns reload-lists")
+        os.system("sudo pihole -g")
         print("[+] Sync complete.")
     else:
         print("[!] No domains to process.")
