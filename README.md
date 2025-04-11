@@ -59,8 +59,19 @@ sudo ./misp-to-pihole.py
 Go chek if its in the Pihole WebGUI
 ![image](https://github.com/user-attachments/assets/7b236e33-86bb-4435-8c03-8f3857812ccb)
 
+ ## Run dns_test.py - to measure performance
+Dowmload the script:
+ ```bash
+chmod +x dns_test.py
+./dns_test.py
+ ```
+Clean the database if needed:
+![image](https://github.com/user-attachments/assets/32222afb-0ccd-42f6-aa89-fccb9222f765)
+Run script and then load blocked domains again to database:
+![image](https://github.com/user-attachments/assets/d05948ef-42b3-48f0-9449-1520f974cd53)
+
  
- ## 5. References & Further Reading
+ ## References & Further Reading
  
  - **MISP Documentation**:  
    [https://github.com/MISP/MISP](https://github.com/MISP/MISP)
