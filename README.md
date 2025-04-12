@@ -66,6 +66,9 @@ chmod +x dns_test.py
 ./dns_test.py
  ```
 Clean the database if needed:
+```
+sudo sqlite3 /etc/pihole/gravity.db "DELETE FROM domainlist"
+```
 ![image](https://github.com/user-attachments/assets/32222afb-0ccd-42f6-aa89-fccb9222f765)
 Run script and then load blocked domains again to database:
 ![image](https://github.com/user-attachments/assets/d05948ef-42b3-48f0-9449-1520f974cd53)
