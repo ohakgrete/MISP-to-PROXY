@@ -55,6 +55,15 @@ chmod +x misp-to-pihole.py
 sudo ./misp-to-pihole.py
  ```
 ![image](https://github.com/user-attachments/assets/0410005a-f65b-419f-a5e3-7d23348bc36d)
+Add the script to run domains from MISP to Pi-hole every six hours:
+```
+sudo crontab -e
+```
+Add line using 1 for nano editor:
+```
+0 */6 * * * /path/to/your/script/misp-pihole.py
+```
+![image](https://github.com/user-attachments/assets/89d5fbc1-52a1-4643-84a7-75f89e4bd012)
 
 Go chek if its in the Pihole WebGUI
 ![image](https://github.com/user-attachments/assets/7b236e33-86bb-4435-8c03-8f3857812ccb)
