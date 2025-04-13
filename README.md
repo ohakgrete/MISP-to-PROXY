@@ -55,6 +55,7 @@ chmod +x misp-to-pihole.py
 sudo ./misp-to-pihole.py
  ```
 ![image](https://github.com/user-attachments/assets/0410005a-f65b-419f-a5e3-7d23348bc36d)
+
 Add the script to run domains from MISP to Pi-hole every six hours:
 ```
 sudo crontab -e
