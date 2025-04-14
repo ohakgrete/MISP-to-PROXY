@@ -15,11 +15,8 @@ DNS_SERVERS = {
     "pihole_with_blocklist": "127.0.0.1",
 }
 
-# Benchmark settings
-TEST_DURATION_SECONDS = 300  # 5 minutes per test
-SLEEP_BETWEEN_QUERIES = 0.01  # 10ms pause
-
-# Source: StevenBlack blocklist
+TEST_DURATION_SECONDS = 300  # 5 minutes
+SLEEP_BETWEEN_QUERIES = 0.01
 STEVENBLACK_HOSTS_URL = "https://raw.githubusercontent.com/StevenBlack/hosts/master/hosts"
 
 
@@ -27,13 +24,8 @@ def fetch_test_domains():
     print("Downloading domain list from StevenBlack...")
     response = requests.get(STEVENBLACK_HOSTS_URL)
     lines = response.text.splitlines()
-
-    domains = []
-    for line in lines:
-        if line.startswith("0.0.0.0") or line.startswith("127.0.0.1"):
-            parts = line.split()
-            if len(parts) >= 2:
-                domains.append(parts[1])
+    domains = [line.split()[1] for line in lines
+               if (line.startswith("0.0.0.0") or line.startswith("127.0.0.1")) and len(line.split()) >= 2]
     print(f"Retrieved {len(domains)} domains.\n")
     return domains
 
@@ -68,7 +60,7 @@ def test_dns(server_ip, domains, duration_seconds):
 
         try:
             answer = resolver.resolve(domain)
-            elapsed = (time.time() - start) * 1000  # in ms
+            elapsed = (time.time() - start) * 1000
             if answer.rrset:
                 category = "allowed"
         except dns.resolver.NXDOMAIN:
@@ -84,7 +76,6 @@ def test_dns(server_ip, domains, duration_seconds):
         cpu, ram = get_system_usage()
         cpu_stats.append(cpu)
         ram_stats.append(ram)
-
         time.sleep(SLEEP_BETWEEN_QUERIES)
 
     successful = [t for t in times if t is not None]
@@ -104,9 +95,23 @@ def test_dns(server_ip, domains, duration_seconds):
     }
 
 
+def print_detailed(label, run_id, stats):
+    print(f"\n--- Results for {label.upper()} (Run {run_id}) ---")
+    print(f"  Total Attempted Queries: {stats['attempted']}")
+    print(f"  Successful Queries: {stats['count']}")
+    print(f"  Avg Latency: {stats['avg']:.2f} ms")
+    print(f"  Min Latency: {stats['min']:.2f} ms")
+    print(f"  Max Latency: {stats['max']:.2f} ms")
+    print(f"  Std Dev: {stats['stddev']:.2f} ms")
+    print(f"  Allowed Domains: {stats['allowed']}")
+    print(f"  Blocked Domains: {stats['blocked']}")
+    print(f"  Failed/Not Resolved: {stats['not_found']}")
+    print(f"  Avg CPU Usage: {stats['cpu_avg']:.2f} %")
+    print(f"  Avg RAM Usage: {stats['ram_avg']:.2f} MB")
+
+
 def average_runs(results_list):
     def avg(values): return sum(values) / len(values) if values else 0
-
     return {
         "avg_latency": avg([r["avg"] for r in results_list]),
         "min_latency": min(r["min"] for r in results_list),
@@ -123,8 +128,7 @@ def average_runs(results_list):
 
 
 def print_summary(label, summary):
-    print(f"\n=== SUMMARY FOR {label.upper()} ===")
-    print(f"  Total Runs: 6")
+    print(f"\n=== SUMMARY FOR {label.upper()} OVER 6 RUNS ===")
     print(f"  Total Attempted Queries: {summary['attempted']}")
     print(f"  Successful Queries: {summary['count']}")
     print(f"  Avg Latency: {summary['avg_latency']:.2f} ms")
@@ -148,7 +152,7 @@ def main():
         for i in range(6):
             print(f"\n--- Run {i+1}/6 for {label} ---")
             stats = test_dns(ip, domains, TEST_DURATION_SECONDS)
-            print(f"  Run {i+1} Completed: {stats['count']} successes, {stats['blocked']} blocked, {stats['not_found']} failed.")
+            print_detailed(label, i+1, stats)
             results_list.append(stats)
 
         summary = average_runs(results_list)
