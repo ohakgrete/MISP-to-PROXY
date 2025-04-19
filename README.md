@@ -60,10 +60,9 @@ Add the script to run domains from MISP to Pi-hole every six hours and fetch MIS
 ```
 sudo crontab -e
 ```
-Add line using 1 for nano editor:
+Add line using 1 for nano editor (we use one command to get new feeds for MISP and then wait for 5 minutes and then load the domains in to Pi-hole database):
 ```
-0 */6 * * * /path/to/your/script/misp-pihole.py
-0 */6 * * * sudo -u www-data /var/www/MISP/app/Console/cake Server fetchFeed 1 all
+0 */6 * * * bash -c 'sudo -u www-data /var/www/MISP/app/Console/cake Server fetchFeed 1 all && sleep 300 && /home/user/misp-to-pihole.py'
 ```
 ![image](https://github.com/user-attachments/assets/89d5fbc1-52a1-4643-84a7-75f89e4bd012)
 
