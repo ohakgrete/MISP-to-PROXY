@@ -64,7 +64,7 @@ Add line using 1 for nano editor (we use one command to get new feeds for MISP a
 ```
 0 */6 * * * bash -c 'sudo -u www-data /var/www/MISP/app/Console/cake Server fetchFeed 1 all && sleep 300 && /home/user/misp-to-pihole.py'
 ```
-![image](https://github.com/user-attachments/assets/89d5fbc1-52a1-4643-84a7-75f89e4bd012)
+![image](https://github.com/user-attachments/assets/52406925-d28c-4ec6-95ab-f6bc739ceafc)
 
 Go chek if its in the Pihole WebGUI
 ![image](https://github.com/user-attachments/assets/7b236e33-86bb-4435-8c03-8f3857812ccb)
