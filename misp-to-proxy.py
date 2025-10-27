@@ -10,9 +10,9 @@ VERIFY_SSL = False                    # set True if MISP has valid TLS
 OUT_DIR = "/opt/misp-proxy/lists"
 DOMAIN_FILE = os.path.join(OUT_DIR, "misp_blocked_domains.txt")
 URL_REGEX_FILE = os.path.join(OUT_DIR, "misp_blocked_url_regex.txt")
+RELOAD_SQUID = True
 # --------------------
 
-# Silence "InsecureRequestWarning" if VERIFY_SSL is False
 if not VERIFY_SSL:
     try:
         import urllib3
@@ -21,151 +21,199 @@ if not VERIFY_SSL:
         pass
 
 HEADERS = {"Accept": "application/json", "Authorization": MISP_API_KEY}
+URL_LIKE_RX = re.compile(r'https?://[^\s"\'<>]+', re.IGNORECASE)
+IS_IPV6_LIKE = re.compile(r'^[0-9A-Fa-f:]+$')
 
-def fetch_attributes():
-    """
-    Fetch attributes from MISP.
-    We try the attributes REST search. Result may be:
-      - dict with "response"
-      - list of dicts
-      - list of strings (one IoC per element)
-    """
-    url = MISP_BASE.rstrip("/") + "/attributes/restSearch/download"
-    payload = {"returnFormat": "json", "type": ["domain", "hostname", "url", "domain|ip"]}
+# ----------------------------------------------------------------------
+
+def fetch_urls_only():
+    """Fetch only attributes of type=url from MISP."""
+    urls = []
+
     try:
-        r = requests.post(url, headers=HEADERS, json=payload, verify=VERIFY_SSL, timeout=90)
-        r.raise_for_status()
-    except Exception as e:
-        print("MISP fetch error:", e)
-        return []
-
-    # Try JSON first
-    try:
-        j = r.json()
-    except ValueError:
-        # Fallback: treat as newline-delimited text
-        text = r.text.strip()
-        if not text:
-            return []
-        # split lines into list of strings
-        return [line.strip() for line in text.splitlines() if line.strip()]
-
-    if isinstance(j, dict) and "response" in j:
-        return j["response"]
-    return j  # could be list of dicts or list of strings
-
-def normalize_domain(d):
-    d = (d or "").strip().lower()
-    d = re.sub(r'^\*\.', '', d)
-    try:
-        return idna.encode(d).decode('ascii')
-    except Exception:
-        return d
-
-def infer_type_and_value(item):
-    """
-    Normalize different shapes into (typ, val).
-    Returns typ in {"domain","url","domain|ip","hostname"} (or inferred) and the value string.
-    """
-    # Case 1: nested {"Attribute": {...}}
-    if isinstance(item, dict) and "Attribute" in item and isinstance(item["Attribute"], dict):
-        a = item["Attribute"]
-        typ = (a.get("type") or "").lower()
-        val = (a.get("value") or "").strip()
-        return typ, val
-
-    # Case 2: flat dict with type/value
-    if isinstance(item, dict) and ("type" in item or "value" in item):
-        typ = (item.get("type") or "").lower()
-        val = (item.get("value") or "").strip()
-        # If type missing, infer from value
-        if not typ:
-            typ = infer_type_from_value(val)
-        return typ, val
-
-    # Case 3: plain string -> infer
-    if isinstance(item, str):
-        val = item.strip()
-        typ = infer_type_from_value(val)
-        return typ, val
-
-    # Unrecognized
-    return "", ""
-
-def infer_type_from_value(val):
-    if not val:
-        return ""
-    # quick URL check
-    try:
-        p = urlparse(val)
-        if p.scheme in ("http", "https") and p.netloc:
-            return "url"
+        j = requests.post(
+            MISP_BASE.rstrip("/") + "/attributes/restSearch",
+            headers=HEADERS,
+            json={"returnFormat": "json", "type": "url"},
+            verify=VERIFY_SSL, timeout=90
+        ).json()
+        resp = j.get("response", {})
+        attr_list = []
+        if isinstance(resp, dict) and "Attribute" in resp:
+            attr_list = resp["Attribute"]
+        elif isinstance(resp, list):
+            for it in resp:
+                if isinstance(it, dict) and "Attribute" in it:
+                    attr_list.append(it["Attribute"])
+                elif isinstance(it, dict):
+                    attr_list.append(it)
+        elif isinstance(j, dict) and "Attribute" in j:
+            attr_list = j["Attribute"]
+        for a in attr_list:
+            if isinstance(a, dict) and (a.get("type") or "").lower() == "url":
+                v = (a.get("value") or "").strip()
+                if v:
+                    urls.append(v)
     except Exception:
         pass
-    # domain|ip style
-    if "|" in val and re.match(r'^[^|]+\|\d+\.\d+\.\d+\.\d+$', val):
-        return "domain|ip"
-    # If it looks like a hostname (contains a dot OR punycode prefix)
-    if "." in val or val.startswith("xn--"):
-        return "domain"  # good enough for blocking purposes
-    return "hostname"
 
-def build_lists(raw_items):
-    domains = set()
-    url_regexes = set()
+    # Fallback: download endpoint
+    if not urls:
+        r = requests.post(
+            MISP_BASE.rstrip("/") + "/attributes/restSearch/download",
+            headers=HEADERS,
+            json={"returnFormat": "json", "type": ["url"]},
+            verify=VERIFY_SSL, timeout=90
+        )
+        try:
+            data = r.json()
+            data = data.get("response", data)
+            if isinstance(data, list):
+                for item in data:
+                    if isinstance(item, dict) and "Attribute" in item:
+                        a = item["Attribute"]
+                        if (a.get("type") or "").lower() == "url":
+                            v = (a.get("value") or "").strip()
+                            if v:
+                                urls.append(v)
+                    elif isinstance(item, dict):
+                        if (item.get("type") or "").lower() == "url":
+                            v = (item.get("value") or "").strip()
+                            if v:
+                                urls.append(v)
+                    elif isinstance(item, str):
+                        if URL_LIKE_RX.search(item):
+                            urls.append(item.strip())
+        except ValueError:
+            for line in (r.text or "").splitlines():
+                line = line.strip()
+                if line and URL_LIKE_RX.search(line):
+                    urls.append(line)
 
-    for item in raw_items:
-        typ, val = infer_type_and_value(item)
-        if not val:
-            continue
-        typ = (typ or "").lower()
+    # Canonicalize & dedup
+    out, seen = [], set()
+    for u in urls:
+        cu = canonical_url(u)
+        if cu and cu not in seen:
+            seen.add(cu)
+            out.append(cu)
+    return out
 
-        if typ in ("domain", "hostname", "domain|ip"):
-            # For domain|ip, take the domain portion if present
-            if typ == "domain|ip" and "|" in val:
-                domain_part = val.split("|", 1)[0]
-                domains.add(normalize_domain(domain_part))
-            else:
-                domains.add(normalize_domain(val))
+# ----------------------------------------------------------------------
 
-        elif typ == "url":
-            # Extract host + path and also add host to domain list
-            try:
-                p = urlparse(val)
-                host = p.hostname
-                if host:
-                    host_n = normalize_domain(host)
-                    domains.add(host_n)
-                    path = (p.path or "/") + (("?" + p.query) if p.query else "")
-                    # Anchor the regex: require the real host and the exact path seen
-                    url_regexes.add(r"^https?://" + re.escape(host_n) + re.escape(path))
-            except Exception:
-                # Fall back: if it doesn't parse, try to treat as domain
-                m = re.search(r'https?://([^/\s]+)', val)
-                if m:
-                    domains.add(normalize_domain(m.group(1)))
+def _safe_netloc(p):
+    """
+    Build a safe netloc without ever reading p.port (which can raise).
+    Handles:
+      - bracketed IPv6: [2001:db8::1] or [2001:db8::1]:8443
+      - hostnames/IPv4 with optional single :port
+      - malformed cases like host:4444:4444 -> ignore the bogus port
+    """
+    raw = p.netloc or ""
+    host = (p.hostname or "").lower()
+    if not host:
+        return ""
 
-    # Convert to Squid suffix format (.domain) except IPs
-    squid_domains = set()
-    for d in domains:
-        if re.match(r'^\d+\.\d+\.\d+\.\d+$', d):
-            squid_domains.add(d)
+    raw = raw.strip()
+
+    # Bracketed IPv6 present in raw?
+    if raw.startswith("[") and "]" in raw:
+        end = raw.index("]")
+        inside = raw[1:end].lower()
+        after = raw[end+1:]  # maybe ":port" or empty
+        m = re.fullmatch(r":(\d+)", after)
+        if m:
+            return f"[{inside}]:{m.group(1)}"
+        return f"[{inside}]"
+
+    # Not bracketed: hostname or IPv4, maybe with :port
+    # Use rsplit once; accept only trailing numeric port. If not numeric (e.g. host:4444:4444), drop port.
+    if ":" in raw:
+        left, right = raw.rsplit(":", 1)
+        if right.isdigit():
+            # use canonical host (from p.hostname) to avoid mixed case or extra colons in 'left'
+            return f"{host}:{right}"
+        # malformed (multiple colons or non-numeric), ignore claimed port
+        return host
+
+    return host
+
+def canonical_url(u: str) -> str:
+    """Lowercase scheme/host, ensure path, and build netloc safely (no p.port)."""
+    s = (u or "").strip().strip('\'"<>')
+    if not s.lower().startswith(("http://", "https://")):
+        return ""
+
+    # First parse attempt
+    try:
+        p = urlparse(s)
+    except Exception:
+        return ""
+
+    # If missing netloc or hostname, bail
+    if not p.netloc or not (p.scheme and p.scheme.lower() in ("http", "https")):
+        return ""
+
+    scheme = p.scheme.lower()
+    netloc = _safe_netloc(p)
+    if not netloc:
+        return ""
+
+    path = p.path or "/"
+    return urlunparse((scheme, netloc, path, p.params, p.query, p.fragment))
+
+# ----------------------------------------------------------------------
+
+def url_to_regexes(u: str):
+    """Return exact + prefix regexes for one canonicalized URL."""
+    if not u:
+        return []
+    try:
+        p = urlparse(u)
+    except Exception:
+        return []
+    host = (p.hostname or "").lower()
+    if not host:
+        return []
+    path = p.path if p.path else "/"
+    q = ("?" + p.query) if p.query else ""
+    exact = r"^https?://" + re.escape(host) + re.escape(path + q) + r"$"
+    prefix = r"^https?://" + re.escape(host) + re.escape(path) + r"(?:[?#].*)?$"
+    return [exact, prefix]
+
+# ----------------------------------------------------------------------
+
+def write_url_regex_file(urls):
+    bad = 0
+    regexes = []
+    for u in urls:
+        rs = url_to_regexes(u)
+        if rs:
+            regexes.extend(rs)
         else:
-            squid_domains.add("." + d.lstrip("."))
+            bad += 1
 
-    return sorted(squid_domains), sorted(url_regexes)
+    # Deduplicate
+    out, seen = [], set()
+    for r in regexes:
+        if r not in seen:
+            seen.add(r)
+            out.append(r)
 
-def write_files(domains, url_regexes):
     os.makedirs(OUT_DIR, exist_ok=True)
-    with open(DOMAIN_FILE, "w") as f:
-        if domains:
-            f.write("\n".join(domains) + "\n")
     with open(URL_REGEX_FILE, "w") as f:
-        if url_regexes:
-            f.write("\n".join(url_regexes) + "\n")
-    print("Wrote:", DOMAIN_FILE, URL_REGEX_FILE)
+        f.write("\n".join(out) + ("\n" if out else ""))
+
+    print(f"Wrote {len(out)} URL regexes -> {URL_REGEX_FILE}")
+    if bad:
+        print(f"Skipped {bad} malformed or unsupported URLs.")
+
+# ----------------------------------------------------------------------
 
 def reload_squid():
+    global RELOAD_SQUID
+    if not RELOAD_SQUID:
+        return
     try:
         import subprocess
         subprocess.check_call(["systemctl", "reload", "squid"])
@@ -173,12 +221,12 @@ def reload_squid():
     except Exception as e:
         print("Squid reload failed:", e)
 
+# ----------------------------------------------------------------------
+
 def main():
-    items = fetch_attributes()
-    print("Fetched", len(items), "attributes/items")
-    domains, urls = build_lists(items)
-    print("Built", len(domains), "domains and", len(urls), "url regexes")
-    write_files(domains, urls)
+    urls = fetch_urls_only()
+    print(f"Fetched {len(urls)} URL attributes")
+    write_url_regex_file(urls)
     reload_squid()
 
 if __name__ == "__main__":
