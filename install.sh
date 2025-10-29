@@ -7,7 +7,7 @@ set -euo pipefail
 PIHOLE_WEB_PORT=8080
 
 # Squid / proxy config
-PROXY_PORT="3128" # Use to add misp.local to chromium proxy settings both http and https and make CA trust installing
+PROXY_PORT="3128" # Use to add misp.local to linux ubuntu settings proxy settings both http and https and make CA trust installing
 ## sudo cp /etc/squid/ssl_cert/myCA.crt /usr/local/share/ca-certificates/squid-proxy.crt
 ## sudo update-ca-certificates - 
 SQUID_USER="proxy"
