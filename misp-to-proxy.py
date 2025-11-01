@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 import os, re, sys, requests
-from urllib.parse import urlparse
+from urllib.parse import urlparse, urlunparse
 import idna
 
 # ---- EDIT THESE ----
