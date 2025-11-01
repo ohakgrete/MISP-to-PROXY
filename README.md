@@ -93,3 +93,28 @@ Run script and then load blocked domains again to database:
  - **Pi-hole Basic Install Script**:  
    [https://github.com/pi-hole/pi-hole/blob/master/automated%20install/basic-install.sh](https://github.com/pi-hole/pi-hole/blob/master/automated%20install/basic-install.sh)
  ```
+
+
+🦊 2. Firefox trust
+
+Firefox ignores the OS trust store by default and uses its own certificate DB per-profile.
+
+Option A — Import manually
+
+Open Firefox → Settings → Privacy & Security
+
+Scroll to Certificates → click View Certificates…
+
+Go to the Authorities tab → click Import
+
+Choose /etc/squid/ssl_cert/myCA.crt
+
+When asked, check:
+
+☑ Trust this CA to identify websites
+
+(Optional) Trust for email users
+
+Restart Firefox
+
+Now open https://google.com — no more warning if proxied through Squid.
