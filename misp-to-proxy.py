@@ -11,6 +11,7 @@ OUT_DIR = "/opt/misp-proxy/lists/"
 DOMAIN_FILE = os.path.join(OUT_DIR, "misp_blocked_domains.txt")
 URL_REGEX_FILE = os.path.join(OUT_DIR, "misp_blocked_url_regex.txt")
 RELOAD_SQUID = True
+
 # --------------------
 
 if not VERIFY_SSL:
@@ -22,14 +23,11 @@ if not VERIFY_SSL:
 
 HEADERS = {"Accept": "application/json", "Authorization": MISP_API_KEY}
 URL_LIKE_RX = re.compile(r'https?://[^\s"\'<>]+', re.IGNORECASE)
-IS_IPV6_LIKE = re.compile(r'^[0-9A-Fa-f:]+$')
 
-# ----------------------------------------------------------------------
+# --------------------------- MISP fetch ---------------------------
 
 def fetch_urls_only():
-    """Fetch only attributes of type=url from MISP."""
     urls = []
-
     try:
         j = requests.post(
             MISP_BASE.rstrip("/") + "/attributes/restSearch",
@@ -57,7 +55,6 @@ def fetch_urls_only():
     except Exception:
         pass
 
-    # Fallback: download endpoint
     if not urls:
         r = requests.post(
             MISP_BASE.rstrip("/") + "/attributes/restSearch/download",
@@ -70,20 +67,13 @@ def fetch_urls_only():
             data = data.get("response", data)
             if isinstance(data, list):
                 for item in data:
-                    if isinstance(item, dict) and "Attribute" in item:
-                        a = item["Attribute"]
-                        if (a.get("type") or "").lower() == "url":
-                            v = (a.get("value") or "").strip()
-                            if v:
-                                urls.append(v)
-                    elif isinstance(item, dict):
-                        if (item.get("type") or "").lower() == "url":
-                            v = (item.get("value") or "").strip()
-                            if v:
-                                urls.append(v)
-                    elif isinstance(item, str):
-                        if URL_LIKE_RX.search(item):
-                            urls.append(item.strip())
+                    a = item.get("Attribute", item) if isinstance(item, dict) else None
+                    if isinstance(a, dict) and (a.get("type") or "").lower() == "url":
+                        v = (a.get("value") or "").strip()
+                        if v:
+                            urls.append(v)
+                    elif isinstance(item, str) and URL_LIKE_RX.search(item):
+                        urls.append(item.strip())
         except ValueError:
             for line in (r.text or "").splitlines():
                 line = line.strip()
@@ -99,75 +89,66 @@ def fetch_urls_only():
             out.append(cu)
     return out
 
-# ----------------------------------------------------------------------
+# ------------------------- canonicalization -----------------------
 
 def _safe_netloc(p):
-    """
-    Build a safe netloc without ever reading p.port (which can raise).
-    Handles:
-      - bracketed IPv6: [2001:db8::1] or [2001:db8::1]:8443
-      - hostnames/IPv4 with optional single :port
-      - malformed cases like host:4444:4444 -> ignore the bogus port
-    """
     raw = p.netloc or ""
     host = (p.hostname or "").lower()
     if not host:
         return ""
-
     raw = raw.strip()
 
-    # Bracketed IPv6 present in raw?
     if raw.startswith("[") and "]" in raw:
         end = raw.index("]")
         inside = raw[1:end].lower()
-        after = raw[end+1:]  # maybe ":port" or empty
+        after = raw[end+1:]
         m = re.fullmatch(r":(\d+)", after)
-        if m:
-            return f"[{inside}]:{m.group(1)}"
-        return f"[{inside}]"
+        return f"[{inside}]:{m.group(1)}" if m else f"[{inside}]"
 
-    # Not bracketed: hostname or IPv4, maybe with :port
-    # Use rsplit once; accept only trailing numeric port. If not numeric (e.g. host:4444:4444), drop port.
     if ":" in raw:
         left, right = raw.rsplit(":", 1)
         if right.isdigit():
-            # use canonical host (from p.hostname) to avoid mixed case or extra colons in 'left'
             return f"{host}:{right}"
-        # malformed (multiple colons or non-numeric), ignore claimed port
         return host
 
     return host
 
 def canonical_url(u: str) -> str:
-    """Lowercase scheme/host, ensure path, and build netloc safely (no p.port)."""
     s = (u or "").strip().strip('\'"<>')
     if not s.lower().startswith(("http://", "https://")):
         return ""
-
-    # First parse attempt
     try:
         p = urlparse(s)
     except Exception:
         return ""
-
-    # If missing netloc or hostname, bail
-    if not p.netloc or not (p.scheme and p.scheme.lower() in ("http", "https")):
+    if not p.netloc or p.scheme.lower() not in ("http", "https"):
         return ""
-
     scheme = p.scheme.lower()
     netloc = _safe_netloc(p)
     if not netloc:
         return ""
-
     path = p.path or "/"
     return urlunparse((scheme, netloc, path, p.params, p.query, p.fragment))
 
-# ----------------------------------------------------------------------
+def _to_punycode(host: str) -> str:
+    try:
+        return idna.encode(host).decode("ascii")
+    except Exception:
+        return host
+
+# ------------------------- regex generation -----------------------
+
+# Simple substring blockers for PCRE-ish constructs
+FORBIDDEN_SUBSTR = [
+    '(?:', '(?=', '(?!', '(?<', '(?P<',  # groups/lookarounds
+    '\\K', '\\R', '\\X',                 # PCRE escapes (as literal backslash)
+]
+# Small safe regexes for backrefs / hex / unicode classes
+RE_BACKREF = re.compile(r'\\[1-9]')                      # \1..\9
+RE_HEXUNI  = re.compile(r'(\\x[0-9A-Fa-f]{2}|\\u[0-9A-Fa-f]{4}|\\p\{)')
 
 def url_to_regexes(u: str):
-    """Return exact + prefix regexes for one canonicalized URL."""
-    if not u:
-        return []
+    """Return exact + prefix regexes (POSIX ERE–compatible)."""
     try:
         p = urlparse(u)
     except Exception:
@@ -175,53 +156,89 @@ def url_to_regexes(u: str):
     host = (p.hostname or "").lower()
     if not host:
         return []
+    host = _to_punycode(host)
     path = p.path if p.path else "/"
     q = ("?" + p.query) if p.query else ""
-    exact = r"^https?://" + re.escape(host) + re.escape(path + q) + r"$"
-    prefix = r"^https?://" + re.escape(host) + re.escape(path) + r"(?:[?#].*)?$"
+
+    scheme_prefix = r"^https?://"
+    exact  = scheme_prefix + re.escape(host) + re.escape(path + q) + r"$"
+    prefix = scheme_prefix + re.escape(host) + re.escape(path) + r"([?#].*)?$"
     return [exact, prefix]
 
-# ----------------------------------------------------------------------
+def _looks_posix_safe(s: str) -> bool:
+    if any(tok in s for tok in FORBIDDEN_SUBSTR):
+        return False
+    if RE_BACKREF.search(s):
+        return False
+    if RE_HEXUNI.search(s):
+        return False
+    # reject trivial bad lines
+    if not s or s in ("*", "+", "?") or s.startswith("^*"):
+        return False
+    return True
+
+def _posix_clean(lines):
+    """Final cleanup to satisfy Squid's POSIX ERE."""
+    out = []
+    for ln in lines:
+        if not ln:
+            continue
+        ln = ln.replace("\r", "")
+        ln = "".join(ch for ch in ln if ch.isprintable())
+        ln = ln.strip()
+        if not ln:
+            continue
+        # normalize legacy artifacts
+        ln = ln.replace(r"\://", "://").replace("(?:", "(")
+        if _looks_posix_safe(ln):
+            out.append(ln)
+    return out
+
+# ------------------------- file writing ---------------------------
 
 def write_url_regex_file(urls):
-    bad = 0
-    regexes = []
+    regs = []
     for u in urls:
-        rs = url_to_regexes(u)
-        if rs:
-            regexes.extend(rs)
-        else:
-            bad += 1
+        regs.extend(url_to_regexes(u))
 
-    # Deduplicate
-    out, seen = [], set()
-    for r in regexes:
+    # Deduplicate (preserve order)
+    seen = set()
+    ordered = []
+    for r in regs:
         if r not in seen:
             seen.add(r)
-            out.append(r)
+            ordered.append(r)
+
+    ordered = _posix_clean(ordered)
 
     os.makedirs(OUT_DIR, exist_ok=True)
-    with open(URL_REGEX_FILE, "w") as f:
-        f.write("\n".join(out) + ("\n" if out else ""))
+    with open(URL_REGEX_FILE, "w", newline="\n") as f:
+        f.write("\n".join(ordered) + ("\n" if ordered else ""))
 
-    print(f"Wrote {len(out)} URL regexes -> {URL_REGEX_FILE}")
-    if bad:
-        print(f"Skipped {bad} malformed or unsupported URLs.")
+    print(f"Wrote {len(ordered)} URL regexes -> {URL_REGEX_FILE}")
 
-# ----------------------------------------------------------------------
+# ------------------------- squid reload --------------------------
 
 def reload_squid():
-    global RELOAD_SQUID
     if not RELOAD_SQUID:
         return
     try:
         import subprocess
-        subprocess.check_call(["systemctl", "reload", "squid"])
-        print("Squid reloaded.")
-    except Exception as e:
-        print("Squid reload failed:", e)
+        # Parse-check first (fail fast with stderr shown)
+        subprocess.check_call(["squid", "-k", "parse"])
 
-# ----------------------------------------------------------------------
+        # Reload if active, otherwise restart so it comes up
+        is_active = (subprocess.call(["systemctl", "is-active", "--quiet", "squid"]) == 0)
+        if is_active:
+            subprocess.check_call(["systemctl", "reload", "squid"])
+            print("Squid parsed OK and reloaded.")
+        else:
+            subprocess.check_call(["systemctl", "restart", "squid"])
+            print("Squid parsed OK and restarted (was inactive).")
+    except Exception as e:
+        print("Squid parse/reload/restart failed:", e)
+
+# ----------------------------- main -------------------------------
 
 def main():
     urls = fetch_urls_only()
