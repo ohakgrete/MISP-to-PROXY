@@ -8,7 +8,7 @@ MISP_BASE = "https://misp.local"
 MISP_API_KEY = "PASTE_YOUR_API_KEY"  # Please get API key from your MISP istance
 VERIFY_SSL = False                    # set True if MISP has valid TLS
 OUT_DIR = "/opt/misp-proxy/lists/"
-DOMAIN_FILE = os.path.join(OUT_DIR, "misp_blocked_domains.txt")
+# DOMAIN_FILE = os.path.join(OUT_DIR, "misp_blocked_domains.txt")
 URL_REGEX_FILE = os.path.join(OUT_DIR, "misp_blocked_url_regex.txt")
 RELOAD_SQUID = True
 
