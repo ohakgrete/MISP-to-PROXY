@@ -249,18 +249,45 @@ EOF
 }
 POL
 
-  ########################################
-  # 6) Initialize ssl_db
-  ########################################
-  say "Initializing ssl_db (helper: ${SSL_HELPER})…"
-  rm -rf "${SSL_DB_DIR}" 2>/dev/null || true
-  "${SSL_HELPER}" -c -s "${SSL_DB_DIR}" -M 16MB >/tmp/ssl_db_init.log 2>&1 || {
+########################################
+# 6) Initialize ssl_db
+########################################
+say "Initializing ssl_db (helper: ${SSL_HELPER})…"
+
+# Clean any old DB
+rm -rf "${SSL_DB_DIR}" 2>/dev/null || true
+
+# Ensure parent directory exists and is writable by 'proxy'
+SSL_DB_PARENT="$(dirname "${SSL_DB_DIR}")"
+mkdir -p "${SSL_DB_PARENT}"
+
+# Typical Debian/Ubuntu defaults: root:proxy 750 on /var/lib/squid
+chown root:"${SQUID_GROUP}" "${SSL_DB_PARENT}" || true
+chmod 750 "${SSL_DB_PARENT}" || true
+
+# First try as 'proxy' user (recommended)
+say "  -> Creating ssl_db as ${SQUID_USER} in ${SSL_DB_DIR}"
+if sudo -u "${SQUID_USER}" "${SSL_HELPER}" -c -s "${SSL_DB_DIR}" -M 16MB \
+     >/tmp/ssl_db_init.log 2>&1; then
+  info "ssl_db initialized by ${SQUID_USER}"
+else
+  warn "ssl_db init as ${SQUID_USER} failed, trying as root…"
+  sed -n '1,40p' /tmp/ssl_db_init.log >&2 || true
+
+  # Fallback: run helper as root
+  if "${SSL_HELPER}" -c -s "${SSL_DB_DIR}" -M 16MB \
+       >/tmp/ssl_db_init.log 2>&1; then
+    info "ssl_db initialized by root"
+  else
     warn "Helper failed to initialize ${SSL_DB_DIR}"
-    sed -n '1,60p' /tmp/ssl_db_init.log >&2 || true
+    sed -n '1,80p' /tmp/ssl_db_init.log >&2 || true
     die "Failed to initialize ssl_db with ${SSL_HELPER}"
-  }
-  chown -R "${SQUID_USER}:${SQUID_GROUP}" "${SSL_DB_DIR}" || true
-  chmod 700 "${SSL_DB_DIR}" || true
+  fi
+fi
+
+# Final ownership + permissions
+chown -R "${SQUID_USER}:${SQUID_GROUP}" "${SSL_DB_DIR}" || true
+chmod 700 "${SSL_DB_DIR}" || true
 
   ########################################
   # 7) Squid config – full bump + URL logging
