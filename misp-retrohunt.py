@@ -1,13 +1,18 @@
 #!/usr/bin/env python3
 import argparse
-import datetime
 import json
 import os
 import re
 import sys
 from typing import Dict, List, Set
+from datetime import datetime, timedelta, timezone
+from urllib.parse import urlparse
 
 import requests
+import urllib3
+
+# Disable HTTPS warnings if using verify=False for local/self-signed MISP
+urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 # =========================
 # CONFIGURATION
@@ -20,7 +25,7 @@ MISP_VERIFY_SSL = False             # Set True if you have proper certs
 
 # Log paths
 SQUID_LOG = "/var/log/squid/url-only.log"
-PIHOLE_LOG = "/var/log/pihole.log"
+PIHOLE_LOG = "/var/log/pihole/pihole.log"
 
 # How many days back to pull IoCs from MISP by default
 DEFAULT_DAYS_BACK = 7
@@ -30,15 +35,71 @@ DEFAULT_DAYS_BACK = 7
 # MISP HELPERS
 # =========================
 
+def fetch_iocs_from_misp(days_back: int) -> Dict[str, Set[str]]:
+    """
+    Fetch ONLY domains/hostnames and URLs from MISP.
+    Returns a dict with sets: {"domains": set(), "urls": set(), "ips": set()}
+    (ips is kept as an empty set only so other code doesn't break).
+    """
+    headers = {
+        "Authorization": MISP_API_KEY,
+        "Accept": "application/json",
+        "Content-Type": "application/json",
+    }
+
+    since_date = (datetime.now(timezone.utc) - timedelta(days=days_back)).strftime("%Y-%m-%d")
+
+    payload = {
+        "returnFormat": "json",
+        "type": ["domain", "hostname", "url"],  # no ip-src / ip-dst
+        "published": True,
+        "date_from": since_date,
+    }
+
+    url = MISP_URL.rstrip("/") + "/attributes/restSearch"
+    try:
+        resp = requests.post(url, headers=headers, json=payload,
+                             verify=MISP_VERIFY_SSL, timeout=60)
+        resp.raise_for_status()
+    except Exception as e:
+        print(f"[!] Error talking to MISP: {e}", file=sys.stderr)
+        sys.exit(1)
+
+    data = resp.json()
+    attributes = data.get("response", {}).get("Attribute", [])
+    domains: Set[str] = set()
+    urls: Set[str] = set()
+
+    for attr in attributes:
+        atype = attr.get("type")
+        value = attr.get("value", "").strip()
+        if not value:
+            continue
+
+        if atype in ("domain", "hostname"):
+            domains.add(value.lower())
+        elif atype == "url":
+            urls.add(value)
+
+    # ips kept for compatibility, but always empty
+    return {
+        "domains": domains,
+        "urls": urls,
+        "ips": set(),
+    }
+
+
+# =========================
+# INDICATOR EXTRACTION / LOG SEARCH
+# =========================
 
 def extract_indicators_from_line(line: str):
     """
-    Extract candidate URLs, domains and IPs from a log line.
-    We keep this generic so it works for both Squid and Pi-hole logs.
+    Extract candidate URLs and domains/hostnames from a log line.
+    We intentionally ignore IPs here.
     """
     urls = set()
     domains = set()
-    ips = set()
 
     # URLs
     url_re = re.compile(r'https?://[^\s"]+')
@@ -53,18 +114,13 @@ def extract_indicators_from_line(line: str):
         except Exception:
             pass
 
-    # IPs
-    ip_re = re.compile(r'\b(?:\d{1,3}\.){3}\d{1,3}\b')
-    for match in ip_re.findall(line):
-        ips.add(match)
-
-    # Domains / hostnames (very rough, but good enough to narrow candidates)
+    # Domains / hostnames (rough, but good enough)
     # example.com, sub.example.co.uk etc.
     domain_re = re.compile(r'\b[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}\b')
     for match in domain_re.findall(line):
         domains.add(match.lower())
 
-    return urls, domains, ips
+    return urls, domains
 
 
 def search_logs_for_iocs(
@@ -73,8 +129,17 @@ def search_logs_for_iocs(
     pihole_lines: List[str]
 ) -> Dict[str, Dict[str, List[str]]]:
     """
-    Faster version: for each line, extract a few candidate indicators,
+    Faster version: for each line, extract candidate URLs/domains,
     then check membership in the IoC sets.
+
+    Returns:
+    {
+      "domain:example.com": {
+          "squid": [line1, line2, ...],
+          "pihole": [line3, ...]
+      },
+      "url:http://evil.com/path": {...}
+    }
     """
 
     result: Dict[str, Dict[str, List[str]]] = {}
@@ -86,43 +151,35 @@ def search_logs_for_iocs(
 
     # Normalised IoC sets
     ioc_domains = {d.lower() for d in iocs["domains"]}
-    ioc_ips = set(iocs["ips"])
     ioc_urls = {u.lower() for u in iocs["urls"]}
 
     # --- Squid ---
     for line in squid_lines:
-        urls, domains, ips = extract_indicators_from_line(line)
+        urls, domains = extract_indicators_from_line(line)
 
         for d in domains:
             if d in ioc_domains:
                 add_hit(f"domain:{d}", "squid", line)
 
-        for ip in ips:
-            if ip in ioc_ips:
-                add_hit(f"ip:{ip}", "squid", line)
-
         for u in urls:
-            # exact URL match
             if u.lower() in ioc_urls:
                 add_hit(f"url:{u}", "squid", line)
 
     # --- Pi-hole ---
     for line in pihole_lines:
-        urls, domains, ips = extract_indicators_from_line(line)
+        urls, domains = extract_indicators_from_line(line)
 
         for d in domains:
             if d in ioc_domains:
                 add_hit(f"domain:{d}", "pihole", line)
-
-        for ip in ips:
-            if ip in ioc_ips:
-                add_hit(f"ip:{ip}", "pihole", line)
 
         for u in urls:
             if u.lower() in ioc_urls:
                 add_hit(f"url:{u}", "pihole", line)
 
     return result
+
+
 # =========================
 # LOG PARSING
 # =========================
@@ -137,71 +194,6 @@ def load_log_lines(path: str) -> List[str]:
     except Exception as e:
         print(f"[!] Failed to read {path}: {e}", file=sys.stderr)
         return []
-
-
-def search_logs_for_iocs(
-    iocs: Dict[str, Set[str]],
-    squid_lines: List[str],
-    pihole_lines: List[str]
-) -> Dict[str, Dict[str, List[str]]]:
-    """
-    Returns:
-    {
-      "domain:example.com": {
-          "squid": [line1, line2, ...],
-          "pihole": [line3, ...]
-      },
-      "ip:1.2.3.4": {...},
-      "url:http://evil.com/path": {...}
-    }
-    """
-
-    result: Dict[str, Dict[str, List[str]]] = {}
-
-    def add_hit(key: str, source: str, line: str):
-        if key not in result:
-            result[key] = {"squid": [], "pihole": []}
-        result[key][source].append(line.strip("\n"))
-
-    # Pre-build simple regex maps to avoid partial-word noise
-    domain_patterns = {
-        d: re.compile(r"\b" + re.escape(d) + r"\b", re.IGNORECASE)
-        for d in iocs["domains"]
-    }
-    ip_patterns = {
-        ip: re.compile(r"\b" + re.escape(ip) + r"\b")
-        for ip in iocs["ips"]
-    }
-    url_patterns = {
-        u: re.compile(re.escape(u), re.IGNORECASE)
-        for u in iocs["urls"]
-    }
-
-    # --- Squid ---
-    for line in squid_lines:
-        for d, pat in domain_patterns.items():
-            if pat.search(line):
-                add_hit(f"domain:{d}", "squid", line)
-        for ip, pat in ip_patterns.items():
-            if pat.search(line):
-                add_hit(f"ip:{ip}", "squid", line)
-        for u, pat in url_patterns.items():
-            if pat.search(line):
-                add_hit(f"url:{u}", "squid", line)
-
-    # --- Pi-hole ---
-    for line in pihole_lines:
-        for d, pat in domain_patterns.items():
-            if pat.search(line):
-                add_hit(f"domain:{d}", "pihole", line)
-        for ip, pat in ip_patterns.items():
-            if pat.search(line):
-                add_hit(f"ip:{ip}", "pihole", line)
-        for u, pat in url_patterns.items():
-            if pat.search(line):
-                add_hit(f"url:{u}", "pihole", line)
-
-    return result
 
 
 # =========================
@@ -292,8 +284,8 @@ def main():
     print(f"[+] Fetching IoCs from MISP (last {args.days} days)...")
     iocs = fetch_iocs_from_misp(args.days)
     print(
-        f"[+] Got {len(iocs['domains'])} domains, "
-        f"{len(iocs['ips'])} IPs, {len(iocs['urls'])} URLs from MISP."
+        f"[+] Got {len(iocs['domains'])} domains/hostnames, "
+        f"{len(iocs['urls'])} URLs from MISP."
     )
 
     print(f"[+] Loading Squid log from {args.squid_log}")
@@ -313,3 +305,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+    
