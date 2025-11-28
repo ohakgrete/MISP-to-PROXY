@@ -98,6 +98,9 @@ install_pihole_if_missing() {
     curl -sSL https://install.pi-hole.net | bash /dev/stdin --unattended
   fi
 
+  ######################################################
+  # 1) Web port (so it doesn't collide with anything)
+  ######################################################
   local PIHOLE_TOML="/etc/pihole/pihole.toml"
   local PORT_LINE='port = "8080o,8443os,[::]:8080o,[::]:8443os"'
   mkdir -p /etc/pihole
@@ -106,8 +109,67 @@ install_pihole_if_missing() {
   else
     echo "$PORT_LINE" >> "$PIHOLE_TOML"
   fi
+
+  ######################################################
+  # 2) Make sure Pi-hole actually logs DNS queries
+  #    (time + client IP + domain + status)
+  ######################################################
+  say "Enabling Pi-hole DNS query logging…"
+
+  # Preferred, version-independent way
+  if have_cmd pihole; then
+    # This turns on both FTL DB logging and the dnsmasq/FTL query log
+    pihole logging on || warn "pihole logging on failed – continuing anyway."
+  fi
+
+  # Additional safety net for newer FTL versions (if available)
+  if have_cmd pihole-FTL; then
+    pihole-FTL --config dns.queryLogging=true || true
+  fi
+
+  ######################################################
+  # 3) Make sure we have a stable DNS query logfile path
+  ######################################################
+  # Classic Pi-hole path is /var/log/pihole.log
+  # Your scripts use /var/log/pihole/pihole.log – keep that working.
+  mkdir -p /var/log/pihole
+
+  # If classic log exists but the subdir one does not, create a symlink
+  if [ -e /var/log/pihole.log ] && [ ! -e /var/log/pihole/pihole.log ]; then
+    ln -sf /var/log/pihole.log /var/log/pihole/pihole.log
+  fi
+
+  # If neither exists yet, create the file we want and let FTL/dnsmasq append
+  if [ ! -e /var/log/pihole.log ] && [ ! -e /var/log/pihole/pihole.log ]; then
+    touch /var/log/pihole/pihole.log
+  fi
+
+  # Ensure FTL can write – user/group names may differ slightly per install,
+  # so we try pihole and fall back to root if needed.
+  chown pihole:pihole /var/log/pihole/pihole.log 2>/dev/null || \
+    chown root:root /var/log/pihole/pihole.log 2>/dev/null || true
+
+  ######################################################
+  # 4) (Optional) dnsmasq-level logging override if needed
+  #    Only add if *no* existing dnsmasq conf uses log-queries/log-facility
+  ######################################################
+  if [ -d /etc/dnsmasq.d ] && ! grep -Rqs "log-queries" /etc/dnsmasq.d 2>/dev/null; then
+    say "Adding explicit dnsmasq logging config for Pi-hole…"
+    cat > /etc/dnsmasq.d/99-misp-logging.conf <<'EOF'
+# Added by MISP proxy installer – DNS query logging for retrohunt
+log-queries
+log-facility=/var/log/pihole/pihole.log
+EOF
+  fi
+
+  ######################################################
+  # 5) Restart FTL so all logging settings are applied
+  ######################################################
   systemctl restart pihole-FTL || true
+
   say "Pi-hole ready on http://misp.local:${PIHOLE_WEB_PORT}/admin"
+  echo "  - DNS query log (for retrohunt): /var/log/pihole/pihole.log"
+  echo "    Each line contains timestamp + resolver + client IP + query/response."
 }
 
 ########################################
@@ -249,45 +311,45 @@ EOF
 }
 POL
 
-########################################
-# 6) Initialize ssl_db
-########################################
-say "Initializing ssl_db (helper: ${SSL_HELPER})…"
+  ########################################
+  # 6) Initialize ssl_db
+  ########################################
+  say "Initializing ssl_db (helper: ${SSL_HELPER})…"
 
-# Clean any old DB
-rm -rf "${SSL_DB_DIR}" 2>/dev/null || true
+  # Clean any old DB
+  rm -rf "${SSL_DB_DIR}" 2>/dev/null || true
 
-# Ensure parent directory exists and is writable by 'proxy'
-SSL_DB_PARENT="$(dirname "${SSL_DB_DIR}")"
-mkdir -p "${SSL_DB_PARENT}"
+  # Ensure parent directory exists and is writable by 'proxy'
+  SSL_DB_PARENT="$(dirname "${SSL_DB_DIR}")"
+  mkdir -p "${SSL_DB_PARENT}"
 
-# Typical Debian/Ubuntu defaults: root:proxy 750 on /var/lib/squid
-chown root:"${SQUID_GROUP}" "${SSL_DB_PARENT}" || true
-chmod 750 "${SSL_DB_PARENT}" || true
+  # Typical Debian/Ubuntu defaults: root:proxy 750 on /var/lib/squid
+  chown root:"${SQUID_GROUP}" "${SSL_DB_PARENT}" || true
+  chmod 750 "${SSL_DB_PARENT}" || true
 
-# First try as 'proxy' user (recommended)
-say "  -> Creating ssl_db as ${SQUID_USER} in ${SSL_DB_DIR}"
-if sudo -u "${SQUID_USER}" "${SSL_HELPER}" -c -s "${SSL_DB_DIR}" -M 16MB \
-     >/tmp/ssl_db_init.log 2>&1; then
-  info "ssl_db initialized by ${SQUID_USER}"
-else
-  warn "ssl_db init as ${SQUID_USER} failed, trying as root…"
-  sed -n '1,40p' /tmp/ssl_db_init.log >&2 || true
-
-  # Fallback: run helper as root
-  if "${SSL_HELPER}" -c -s "${SSL_DB_DIR}" -M 16MB \
+  # First try as 'proxy' user (recommended)
+  say "  -> Creating ssl_db as ${SQUID_USER} in ${SSL_DB_DIR}"
+  if sudo -u "${SQUID_USER}" "${SSL_HELPER}" -c -s "${SSL_DB_DIR}" -M 16MB \
        >/tmp/ssl_db_init.log 2>&1; then
-    info "ssl_db initialized by root"
+    info "ssl_db initialized by ${SQUID_USER}"
   else
-    warn "Helper failed to initialize ${SSL_DB_DIR}"
-    sed -n '1,80p' /tmp/ssl_db_init.log >&2 || true
-    die "Failed to initialize ssl_db with ${SSL_HELPER}"
-  fi
-fi
+    warn "ssl_db init as ${SQUID_USER} failed, trying as root…"
+    sed -n '1,40p' /tmp/ssl_db_init.log >&2 || true
 
-# Final ownership + permissions
-chown -R "${SQUID_USER}:${SQUID_GROUP}" "${SSL_DB_DIR}" || true
-chmod 700 "${SSL_DB_DIR}" || true
+    # Fallback: run helper as root
+    if "${SSL_HELPER}" -c -s "${SSL_DB_DIR}" -M 16MB \
+         >/tmp/ssl_db_init.log 2>&1; then
+      info "ssl_db initialized by root"
+    else
+      warn "Helper failed to initialize ${SSL_DB_DIR}"
+      sed -n '1,80p' /tmp/ssl_db_init.log >&2 || true
+      die "Failed to initialize ssl_db with ${SSL_HELPER}"
+    fi
+  fi
+
+  # Final ownership + permissions
+  chown -R "${SQUID_USER}:${SQUID_GROUP}" "${SSL_DB_DIR}" || true
+  chmod 700 "${SSL_DB_DIR}" || true
 
   ########################################
   # 7) Squid config – full bump + URL logging
@@ -329,12 +391,13 @@ http_access deny all
 strip_query_terms off
 uri_whitespace encode
 
-# Full access log
+# Full access log (includes client IP, URL, status, etc.)
 logformat custom "%ts.%03tu %>a %un \"%>rm %>ru %rv\" %>Hs %<st %Ss:%Sh"
 access_log /var/log/squid/access.log custom
 
-# URL-only log for retrohunting
-logformat urlonly "%>rm %>ru"
+# URL-only retrohunt log:
+#   time | client IP | username | method | full URL
+logformat urlonly "%ts.%03tu %>a %un %>rm %>ru"
 access_log ${LOG_URL_ONLY} urlonly
 
 tls_outgoing_options cafile=/etc/ssl/certs/ca-certificates.crt
@@ -354,7 +417,7 @@ SQUID
   systemctl restart squid || (journalctl -xeu squid.service | sed -n '1,160p'; exit 1)
 
   say "Squid is running on port ${PROXY_PORT}"
-  echo "  - URL log: ${LOG_URL_ONLY}"
+  echo "  - URL log (retronhunt): ${LOG_URL_ONLY}"
   echo "  - System CA: /usr/local/share/ca-certificates/misp-proxy-ca.crt"
   echo "  - Firefox CA: /etc/firefox/certs/misp-proxy-ca.crt"
   echo "  - Firefox policy: /etc/firefox/policies/policies.json"
@@ -374,5 +437,7 @@ say "DONE."
 echo "Set your browser / curl proxy to: http://$(hostname -f 2>/dev/null || hostname):${PROXY_PORT}"
 echo "Check curl trust with:"
 echo "  curl -x http://misp.local:${PROXY_PORT} https://www.neti.ee -v"
-echo "Check URL log with:"
+echo "Squid retrohunt log (IP + URL):"
 echo "  sudo tail -f ${LOG_URL_ONLY}"
+echo "Pi-hole DNS log (IP + domain):"
+echo "  sudo tail -f /var/log/pihole/pihole.log"
