@@ -23,6 +23,35 @@
 chmod +x install.sh
 sudo ./install.sh
  ```
+ ### During installation (Pi-hole Automated Installer)
+ Welcome page
+ 
+ <img width="794" height="519" alt="Screenshot 2025-11-29 at 20 55 23" src="https://github.com/user-attachments/assets/0ca5fcbf-1dff-41c0-be3b-0fd3110807e7" />
+ 
+ In prototype, using local host IP 127.0.0.1, so "continue"
+
+ <img width="794" height="519" alt="Screenshot 2025-11-29 at 20 58 15" src="https://github.com/user-attachments/assets/44b9997b-a320-4f38-a41a-177595e7bef4" />
+
+ In prototype, using unfiltered, no DNSSEC, but can be others
+
+ <img width="794" height="519" alt="Screenshot 2025-11-29 at 21 02 15" src="https://github.com/user-attachments/assets/28df7d81-0ff7-4310-9a4d-0b9b35588e63" />
+
+Since using MISP, it is not needed
+
+<img width="794" height="519" alt="Screenshot 2025-11-29 at 21 05 10" src="https://github.com/user-attachments/assets/2029d05c-3e42-4ae4-b558-9ef05a0d1ce4" />
+
+Important for retrohunt, "yes"
+
+<img width="794" height="519" alt="Screenshot 2025-11-29 at 21 07 26" src="https://github.com/user-attachments/assets/f0e6b8bb-bd00-4e40-8fec-b636e77af620" />
+
+For retrohunt, logs needed, "continue"
+
+<img width="794" height="519" alt="Screenshot 2025-11-29 at 21 08 39" src="https://github.com/user-attachments/assets/0ff03761-bf38-4990-8718-99311fee1644" />
+
+
+
+ 
+
  
  ### After script finish
 Use the Pihole password to login:
