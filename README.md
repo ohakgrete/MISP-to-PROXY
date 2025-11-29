@@ -60,7 +60,7 @@ Open misp link (have to trust certificate) from terminal and Scroll up from the 
  ![image](https://github.com/user-attachments/assets/10a328bb-f9e5-4895-8a03-d02232050f3b)
 Change the password and you are in!
 
-Add new API key for your MISP admin account
+Add new API key for your MISP admin account, fields can be left empty
 ![image](https://github.com/user-attachments/assets/2b1e4ea9-4077-4731-9a72-cb744544566a)
 Add your key to misp-to-pihole.py 
 ![image](https://github.com/user-attachments/assets/de7dc2fd-b4b3-49be-a6bc-03ad98c169c7)
