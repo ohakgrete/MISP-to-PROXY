@@ -65,12 +65,13 @@ Add new API key for your MISP admin account, fields can be left empty
 Add your key to misp-to-pihole.py AND also add the key to misp-to-proxy.py and misp-retrohunt.py (var name MISP_API_KEY)
 ![image](https://github.com/user-attachments/assets/de7dc2fd-b4b3-49be-a6bc-03ad98c169c7)
 
-Enable MISP feeds 
+Enable MISP feeds
+
 ![image](https://github.com/user-attachments/assets/66771717-1c81-4051-b5c3-c9b8456b0845)
 ![image](https://github.com/user-attachments/assets/349bb8b9-9828-438b-b5a2-1bff7c593b41)
 Click on the balck button with white arrow down, will see the Green box pop up
 ![image](https://github.com/user-attachments/assets/30981fc6-853b-4702-88a9-1a2a4df182d2)
-Click on the Home button and make sure you have some events in, I have more than 237 alread
+Click on the Home button and make sure you have some events
 ![image](https://github.com/user-attachments/assets/19dd9c26-5db6-46f3-af30-5ff5c700201f)
 
 
@@ -91,12 +92,15 @@ sudo crontab -e
 ```
 Add line using 1 for nano editor (we use one command to get new feeds for MISP and then wait for 5 minutes and then load the domains in to Pi-hole database):
 ```
-0 */6 * * * bash -c 'sudo -u www-data /var/www/MISP/app/Console/cake Server fetchFeed 1 all && sleep 300 && /home/user/misp-to-pihole.py'
+0 */6 * * * bash -c 'sudo -u www-data /var/www/MISP/app/Console/cake Server fetchFeed 1 all && sleep 300 && /{YourFileLocation}/misp-to-pihole.py'
 ```
 ![image](https://github.com/user-attachments/assets/52406925-d28c-4ec6-95ab-f6bc739ceafc)
 
 Go chek if its in the Pihole WebGUI
 ![image](https://github.com/user-attachments/assets/7b236e33-86bb-4435-8c03-8f3857812ccb)
+
+## Run misp-to-proxy.py
+
 
  ## Run dns_test.py - to measure performance
 Dowmload the script:
