@@ -140,6 +140,38 @@ Now the url is blocked:
 
 <img width="1335" height="425" alt="Screenshot 2025-11-29 at 23 14 56" src="https://github.com/user-attachments/assets/e47d83f3-d929-4946-84bd-188699236f47" />
 
+## Run misp-retrohunt.py
+Before running retrohunt script:
+1) proxy logs needed- already have, because Firefox proxy settings are changed
+2) DNS logs needed- need to configure
+How to get DNS logs:
+Change Ubuntu network settings to use Pi-hole as DNS server
+
+<img width="973" height="634" alt="Screenshot 2025-11-29 at 23 24 29" src="https://github.com/user-attachments/assets/fa62c5de-ebda-40f1-a129-5bceb78b4ad4" />
+
+### Test scenario for retrohunt
+
+Visiting 2 webpages
+Creating new MISP event
+Populate from -> Freetext Import Tool -> then add thoses visited urls and domains
+
+<img width="1490" height="732" alt="Screenshot 2025-11-29 at 23 36 36" src="https://github.com/user-attachments/assets/6355dc05-5891-4f0b-8445-322e2e07bc13" />
+
+Verify and submit attributes
+
+<img width="1490" height="732" alt="Screenshot 2025-11-29 at 23 40 27" src="https://github.com/user-attachments/assets/713f1a99-3f2e-4a72-a6ef-db4cea6a3d47" />
+
+Now, click Publish (no email)
+
+```bash
+chmod +x misp-retrohunt.py
+sudo ./misp-retrohunt.py
+ ```
+After script, in the output visible: 2 new events- one for Squid and one for Pi-hole
+
+<img width="1120" height="163" alt="Screenshot 2025-11-29 at 23 54 46" src="https://github.com/user-attachments/assets/5089fff4-fa15-4018-aaae-8980af0daa01" />
+
+Results are visible under those events, notified that potentially malicious urls were clicked
 
 
 
@@ -173,7 +205,11 @@ Run script and then load blocked domains again to database:
  - **Pi-hole Documentation**:  
    [https://github.com/pi-hole/pi-hole](https://github.com/pi-hole/pi-hole)
  - **Pi-hole Basic Install Script**:  
-   [https://github.com/pi-hole/pi-hole/blob/master/automated%20install/basic-install.sh](https://github.com/pi-hole/pi-hole/blob/master/automated%20install/basic-install.sh)
+   [https://github.com/pi-hole/pi-hole/blob/master/automated%20install/basic-install.sh](https://github.com/pi-hole/pi-hole/blob/master/automated%20install/basic-install.sh) 
+ - **Squid Documentation**:
+   [https://www.squid-cache.org/Doc/]
+   
+   
  ```
 
 
