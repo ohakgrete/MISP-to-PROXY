@@ -174,15 +174,6 @@ After script, in the output visible: 2 new events- one for Squid and one for Pi-
 Results are visible under those events, notified that potentially malicious urls were clicked
 
 
-
-
-
-
-
-
-
-
-
  ## Run dns_test.py - to measure performance
 Dowmload the script:
  ```bash
@@ -210,29 +201,3 @@ Run script and then load blocked domains again to database:
    [https://www.squid-cache.org/Doc/]
    
    
- ```
-
-
-🦊 2. Firefox trust
-
-Firefox ignores the OS trust store by default and uses its own certificate DB per-profile.
-
-Option A — Import manually
-
-Open Firefox → Settings → Privacy & Security
-
-Scroll to Certificates → click View Certificates…
-
-Go to the Authorities tab → click Import
-
-Choose /etc/squid/ssl_cert/myCA.crt
-
-When asked, check:
-
-☑ Trust this CA to identify websites
-
-(Optional) Trust for email users
-
-Restart Firefox
-
-Now open https://google.com — no more warning if proxied through Squid.
