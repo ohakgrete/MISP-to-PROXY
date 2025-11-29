@@ -1,13 +1,13 @@
- # MISP + Pi-hole Installation Guide
+ # MISP + Pi-hole + Squid Proxy Installation Guide
  
- This README provides step-by-step instructions for installing both **MISP** (Malware Information Sharing Platform) and **Pi-hole** on a Ubuntu-based system (tested on Ubuntu 24.04). The process uses the official installation scripts from each project’s GitHub repository.
+ This README provides step-by-step instructions for installing both **MISP** (Malware Information Sharing Platform), **Pi-hole** and **Squid proxy** on a Ubuntu-based system (tested on Ubuntu 24.04). The process uses the official installation scripts from each project’s GitHub repository.
  
  ---
  
  ## Important
  
  - These scripts assume you have **sudo** or **root** privileges.  
- - MISP and Pi-hole each have their own dependencies; ensure your system is up-to-date before proceeding.  
+ - MISP, Pi-hole, Squid proxy each have their own dependencies; ensure your system is up-to-date before proceeding.  
  - If you plan to run both on the **same machine**, verify that there are no port conflicts (e.g., Pi-hole typically runs a DNS service and a web dashboard).  
  - Consult each project’s official documentation for more advanced configuration.
  
@@ -18,7 +18,7 @@
  ### Operating System
  - Ubuntu 24.04 LTS
  
- ### Run the install.sh - It will install MISP and then Pi-Hole
+ ### Run the install.sh - It will install MISP, Pi-Hole an then Squid proxy
  ```bash
 chmod +x install.sh
 sudo ./install.sh
