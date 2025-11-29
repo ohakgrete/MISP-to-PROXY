@@ -6,6 +6,14 @@ set -euo pipefail
 ########################################
 PIHOLE_WEB_PORT=8080
 
+# Optional: set before running script, e.g.:
+#   export PIHOLE_ADMIN_PASSWORD="changeme123!"
+PIHOLE_ADMIN_PASSWORD="${PIHOLE_ADMIN_PASSWORD:-}"
+
+# MISP default credentials (created by the official installer)
+MISP_ADMIN_USER="admin@admin.test"
+MISP_ADMIN_PASS="admin"
+
 PROXY_PORT="3128"
 SQUID_USER="proxy"
 SQUID_GROUP="proxy"
@@ -96,6 +104,16 @@ install_pihole_if_missing() {
   else
     say "Installing Pi-hole unattended…"
     curl -sSL https://install.pi-hole.net | bash /dev/stdin --unattended
+  fi
+
+  ######################################################
+  # 0) Set Pi-hole web password if configured
+  ######################################################
+  if have_cmd pihole && [ -n "${PIHOLE_ADMIN_PASSWORD}" ]; then
+    say "Setting Pi-hole admin password from PIHOLE_ADMIN_PASSWORD env…"
+    # Pass same password twice: new + confirm
+    pihole -a -p "${PIHOLE_ADMIN_PASSWORD}" "${PIHOLE_ADMIN_PASSWORD}" || \
+      warn "Failed to set Pi-hole password via pihole -a -p"
   fi
 
   ######################################################
@@ -434,10 +452,36 @@ install_or_update_squid
 
 echo
 say "DONE."
-echo "Set your browser / curl proxy to: http://$(hostname -f 2>/dev/null || hostname):${PROXY_PORT}"
+
+echo
+echo "==================== MISP ===================="
+echo "  URL:      https://misp.local/"
+echo "  Username: ${MISP_ADMIN_USER}"
+echo "  Password: ${MISP_ADMIN_PASS}"
+echo "  (Change this ASAP in the MISP UI.)"
+
+echo
+echo "=================== Pi-hole =================="
+echo "  URL:      http://misp.local:${PIHOLE_WEB_PORT}/admin"
+
+if [ -n "${PIHOLE_ADMIN_PASSWORD}" ]; then
+  echo "  Password: ${PIHOLE_ADMIN_PASSWORD}"
+  echo "  (Set from PIHOLE_ADMIN_PASSWORD env var.)"
+else
+  echo "  Password: (not set by this script)"
+  echo "  To set/change: sudo pihole -a -p"
+fi
+
+echo
+echo "=================== Proxy ===================="
+echo "Set your browser / curl proxy to:"
+echo "  http://$(hostname -f 2>/dev/null || hostname):${PROXY_PORT}"
+echo
 echo "Check curl trust with:"
 echo "  curl -x http://misp.local:${PROXY_PORT} https://www.neti.ee -v"
+echo
 echo "Squid retrohunt log (IP + URL):"
 echo "  sudo tail -f ${LOG_URL_ONLY}"
+echo
 echo "Pi-hole DNS log (IP + domain):"
 echo "  sudo tail -f /var/log/pihole/pihole.log"
