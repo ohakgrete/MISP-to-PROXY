@@ -62,7 +62,7 @@ Change the password and you are in!
 
 Add new API key for your MISP admin account, fields can be left empty
 ![image](https://github.com/user-attachments/assets/2b1e4ea9-4077-4731-9a72-cb744544566a)
-Add your key to misp-to-pihole.py 
+Add your key to misp-to-pihole.py AND also add the key to misp-to-proxy.py and misp-retrohunt.py (var name MISP_API_KEY)
 ![image](https://github.com/user-attachments/assets/de7dc2fd-b4b3-49be-a6bc-03ad98c169c7)
 
 Enable MISP feeds 
