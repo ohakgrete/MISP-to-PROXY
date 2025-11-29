@@ -101,6 +101,20 @@ Go chek if its in the Pihole WebGUI
 
 ## Run misp-to-proxy.py
 
+ ```bash
+chmod +x misp-to-proxy.py
+sudo ./misp-to-proxy.py
+ ```
+Output is something like that:
+
+<img width="1850" height="681" alt="Screenshot 2025-11-29 at 22 32 15" src="https://github.com/user-attachments/assets/a6639876-b218-49da-871c-83229bade794" />
+
+Change browser proxy settings (in prototype Firefox is used)
+Settings -> Network settings -> Connection setting (window popup)
+
+<img width="1283" height="780" alt="Screenshot 2025-11-29 at 22 52 14" src="https://github.com/user-attachments/assets/47397804-eeb5-4120-874f-b4a156d049c1" />
+
+
 
  ## Run dns_test.py - to measure performance
 Dowmload the script:
