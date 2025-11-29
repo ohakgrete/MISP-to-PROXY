@@ -114,6 +114,41 @@ Settings -> Network settings -> Connection setting (window popup)
 
 <img width="1283" height="780" alt="Screenshot 2025-11-29 at 22 52 14" src="https://github.com/user-attachments/assets/47397804-eeb5-4120-874f-b4a156d049c1" />
 
+### Test scenario for Squid proxy:
+Add event
+
+<img width="1135" height="772" alt="Screenshot 2025-11-29 at 23 04 41" src="https://github.com/user-attachments/assets/bf47a777-a15e-43e2-8659-27e48a526d05" />
+
+Adding atribute to MISP event to block specific url
+
+<img width="1335" height="772" alt="Screenshot 2025-11-29 at 23 08 15" src="https://github.com/user-attachments/assets/8686775e-9764-4dbd-adaa-36312e1834b2" />
+
+Block Reddit url exc.
+
+<img width="1335" height="772" alt="Screenshot 2025-11-29 at 23 09 54" src="https://github.com/user-attachments/assets/fd819563-2e30-4a4c-836d-64375cfc00bd" />
+
+Submit attributes
+
+<img width="1335" height="772" alt="Screenshot 2025-11-29 at 23 11 16" src="https://github.com/user-attachments/assets/dac6c780-0304-45bb-8be3-577d04fbaaa4" />
+
+Publish event, "yes"
+
+<img width="1335" height="772" alt="Screenshot 2025-11-29 at 23 12 13" src="https://github.com/user-attachments/assets/8ea94aeb-2e05-42da-b96f-13fd04eb7d6a" />
+
+Rerun the misp-to-proxy.py
+Now the url is blocked:
+
+<img width="1335" height="425" alt="Screenshot 2025-11-29 at 23 14 56" src="https://github.com/user-attachments/assets/e47d83f3-d929-4946-84bd-188699236f47" />
+
+
+
+
+
+
+
+
+
+
 
 
  ## Run dns_test.py - to measure performance
