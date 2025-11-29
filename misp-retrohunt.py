@@ -4,6 +4,8 @@ import json
 import os
 import re
 import sys
+import gzip
+import glob
 from typing import Dict, List, Set
 from datetime import datetime, timedelta, timezone
 from urllib.parse import urlparse
@@ -11,7 +13,6 @@ from urllib.parse import urlparse
 import requests
 import urllib3
 
-# Disable HTTPS warnings if using verify=False for local/self-signed MISP
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 # =========================
@@ -20,7 +21,7 @@ urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 # MISP connection
 MISP_URL = "https://misp.local"      # Change if needed
-MISP_API_KEY = "changeMe"          # <-- replace and DO NOT commit real key
+MISP_API_KEY = "MuudaMind"          # <-- replace and DO NOT commit real key
 MISP_VERIFY_SSL = False             # Set True if you have proper certs
 
 # Log paths
@@ -37,28 +38,83 @@ MAX_ATTRIBUTES_PER_EVENT = 500
 URL_RE = re.compile(r'https?://[^\s"]+')
 DOMAIN_RE = re.compile(r'\b[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}\b')
 
-# Pi-hole dnsmasq query line, e.g.:
-# Nov 29 19:55:25 dnsmasq[49424]: query[A] api.x.com from 127.0.0.1
 PIHOLE_QUERY_RE = re.compile(
     r'^(?P<mon>\w{3})\s+'
     r'(?P<day>\d{1,2})\s+'
     r'(?P<hour>\d{2}):(?P<minute>\d{2}):(?P<second>\d{2})\s+'
-    r'.*dnsmasq\[\d+\]:\s+query\[[^\]]+\]\s+'
+    r'.*dnsmasq\[\d+\]:\s*query\[[A-Z]+\]\s+'
     r'(?P<domain>\S+)\s+from\s+(?P<client>\S+)'
 )
+
+# =========================
+# LOG LOADING WITH ROTATION
+# =========================
+
+def load_rotated_logs(base_path: str) -> List[str]:
+    """Load .log, .log.1, .log.2.gz automatically."""
+    log_dir = os.path.dirname(base_path)
+    base_name = os.path.basename(base_path)
+
+    pattern = os.path.join(log_dir, base_name + "*")
+    files = sorted(glob.glob(pattern))
+
+    all_lines = []
+
+    for fpath in files:
+        try:
+            if fpath.endswith(".gz"):
+                with gzip.open(fpath, "rt", encoding="utf-8", errors="ignore") as f:
+                    all_lines.extend(f.readlines())
+            else:
+                with open(fpath, "r", encoding="utf-8", errors="ignore") as f:
+                    all_lines.extend(f.readlines())
+        except Exception as e:
+            print(f"[!] Failed to read {fpath}: {e}", file=sys.stderr)
+
+    return all_lines
+
+def load_pihole_logs() -> List[str]:
+    lines = []
+
+    candidates = [
+        "/var/log/pihole/pihole.log",
+        "/var/log/pihole/pihole.log.1",
+    ]
+
+    # include compressed logs if present
+    for num in range(2, 10):
+        gz = f"/var/log/pihole/pihole.log.{num}.gz"
+        if os.path.exists(gz):
+            candidates.append(gz)
+
+    for path in candidates:
+        if not os.path.exists(path):
+            continue
+
+        try:
+            if path.endswith(".gz"):
+                import gzip
+                with gzip.open(path, "rt", encoding="utf-8", errors="ignore") as f:
+                    lines.extend(f.readlines())
+            else:
+                with open(path, "r", encoding="utf-8", errors="ignore") as f:
+                    lines.extend(f.readlines())
+        except Exception as e:
+            print(f"[!] Failed to read {path}: {e}")
+
+    return lines
 
 
 # =========================
 # MISP HELPERS
 # =========================
 
-def misp_headers() -> Dict[str, str]:
+def misp_headers():
     return {
         "Authorization": MISP_API_KEY,
         "Accept": "application/json",
-        "Content-Type": "application/json",
+        "Content-Type": "application/json"
     }
-
 
 def fetch_iocs_from_misp(days_back: int) -> Dict[str, Set[str]]:
     """Fetch ONLY domains/hostnames and URLs from MISP (last N days)."""
@@ -89,6 +145,7 @@ def fetch_iocs_from_misp(days_back: int) -> Dict[str, Set[str]]:
 
     data = resp.json()
     attributes = data.get("response", {}).get("Attribute", [])
+
     domains: Set[str] = set()
     urls: Set[str] = set()
 
@@ -103,7 +160,7 @@ def fetch_iocs_from_misp(days_back: int) -> Dict[str, Set[str]]:
         elif atype == "url":
             urls.add(value)
 
-    return {"domains": domains, "urls": urls, "ips": set()}
+    return {"domains": domains, "urls": urls}
 
 
 def create_misp_event(info: str) -> str:
@@ -116,473 +173,261 @@ def create_misp_event(info: str) -> str:
             "analysis": 2,
         }
     }
-
-    url = MISP_URL.rstrip("/") + "/events/add"
     try:
         resp = requests.post(
-            url,
+            MISP_URL.rstrip("/") + "/events/add",
             headers=misp_headers(),
             json=event_data,
-            verify=MISP_VERIFY_SSL,
-            timeout=60,
+            verify=MISP_VERIFY_SSL
         )
         resp.raise_for_status()
+        return str(resp.json()["Event"]["id"])
     except Exception as e:
-        print(f"[!] Failed to create MISP event: {e}", file=sys.stderr)
+        print(f"[!] Failed creating MISP event: {e}")
         return ""
 
-    try:
-        event_id = str(resp.json()["Event"]["id"])
-    except Exception:
-        print("[!] Unexpected MISP response when creating event.", file=sys.stderr)
-        return ""
 
-    print(f"[+] Created MISP event with ID {event_id}")
-    return event_id
-
-
-def add_attribute_to_event(
-    event_id: str,
-    attr_type: str,
-    value: str,
-    category: str,
-    to_ids: bool,
-    comment: str,
-) -> bool:
-    attr_data = {
+def add_attribute(event_id, attr_type, value, category, to_ids, comment) -> bool:
+    data = {
         "Attribute": {
             "type": attr_type,
             "category": category,
             "to_ids": to_ids,
             "value": value,
-            "comment": comment,
+            "comment": comment
         }
     }
-
-    url = MISP_URL.rstrip("/") + f"/attributes/add/{event_id}"
     try:
         resp = requests.post(
-            url,
+            MISP_URL.rstrip("/") + f"/attributes/add/{event_id}",
             headers=misp_headers(),
-            json=attr_data,
-            verify=MISP_VERIFY_SSL,
-            timeout=60,
+            json=data,
+            verify=MISP_VERIFY_SSL
         )
         resp.raise_for_status()
         return True
     except Exception as e:
-        print(f"[!] Failed to add attribute to event {event_id}: {e}", file=sys.stderr)
+        print(f"[!] Failed adding attribute to event {event_id}: {e}")
         return False
 
 
 # =========================
-# SQUID PARSING
+# PARSERS
 # =========================
 
 def parse_squid_line(line: str):
-    """
-    Parse url-only.log lines like:
-    "1764357156.840 127.0.0.1 - GET https://api.x.com/1.1/graphql/..."
-    Returns dict or None.
-    """
     stripped = line.strip().strip('"')
     parts = stripped.split(" ", 4)
     if len(parts) < 4:
         return None
 
-    ts_str = parts[0]         # 1764357156.840
-    client_ip = parts[1]      # 127.0.0.1
-    user = parts[2]           # username or '-'
-    method = parts[3]         # GET / POST / CONNECT / ...
-    rest = parts[4] if len(parts) >= 5 else ""
+    ts_str, ip, user, method = parts[:4]
+    payload = parts[4] if len(parts) >= 5 else ""
 
-    iso_time = None
     try:
-        ts_float = float(ts_str)
-        iso_time = datetime.fromtimestamp(ts_float, timezone.utc).isoformat()
-    except Exception:
-        pass
+        ts_iso = datetime.fromtimestamp(float(ts_str), timezone.utc).isoformat()
+    except:
+        ts_iso = "unknown"
 
     return {
-        "timestamp_str": ts_str,
-        "timestamp_iso": iso_time,
-        "client_ip": client_ip,
-        "user": user,
+        "timestamp": ts_iso,
+        "ip": ip,
         "method": method,
-        "payload": rest,
+        "payload": payload
     }
 
 
-
-# =========================
-# PI-HOLE PARSING
-# =========================
-
 def parse_pihole_line(line: str):
-    """
-    Parse pihole.log dnsmasq query lines like:
-    Nov 29 19:55:25 dnsmasq[49424]: query[A] api.x.com from 127.0.0.1
-    """
     m = PIHOLE_QUERY_RE.match(line.strip())
     if not m:
+        # DEBUG: Show every DNS query line that the regex fails to parse
+        if "query[" in line:
+            print("[DEBUG] PIHOLE MISSED:", line.strip())
         return None
-
-    mon = m.group("mon")
-    day = int(m.group("day"))
-    hour = int(m.group("hour"))
-    minute = int(m.group("minute"))
-    second = int(m.group("second"))
-    domain = m.group("domain")
-    client = m.group("client")
 
     year = datetime.now().year
     try:
         dt = datetime.strptime(
-            f"{year} {mon} {day:02d} {hour:02d}:{minute:02d}:{second:02d}",
-            "%Y %b %d %H:%M:%S",
+            f"{year} {m.group('mon')} {m.group('day')} "
+            f"{m.group('hour')}:{m.group('minute')}:{m.group('second')}",
+            "%Y %b %d %H:%M:%S"
         )
         ts_iso = dt.isoformat()
-    except Exception:
-        ts_iso = None
+    except:
+        ts_iso = "unknown"
 
     return {
-        "timestamp_iso": ts_iso,
-        "domain": domain,
-        "client": client,
+        "timestamp": ts_iso,
+        "domain": m.group("domain").lower(),
+        "client": m.group("client")
     }
 
-def extract_indicators_from_line(line: str, source: str):
-    """
-    Extract candidate URLs and domains/hostnames from a log line.
+# =========================
+# IoC EXTRACTION
+# =========================
 
-    - For squid: parse url-only line, use the payload, and treat
-      CONNECT host:443 as a domain.
-    - For pihole: ONLY use dnsmasq *query* lines (no reply/cached),
-      parsed via parse_pihole_line().
-    """
-    urls: Set[str] = set()
-    domains: Set[str] = set()
+def extract_squid_indicators(line: str):
+    parsed = parse_squid_line(line)
+    if not parsed:
+        return set(), set(), None
 
-    text = line
+    urls = set()
+    domains = set()
 
-    if source == "squid":
-        parsed = parse_squid_line(line)
-        if parsed:
-            text = parsed["payload"]
+    payload = parsed["payload"]
+    method = parsed["method"]
 
-            # CONNECT host:443 -> treat host as domain
-            if parsed["method"] == "CONNECT" and text and "://" not in text:
-                host = text.split(":", 1)[0]
-                domains.add(host.lower())
+    # CONNECT www.evil.com:443
+    if method == "CONNECT" and "://" not in payload:
+        domains.add(payload.split(":")[0].lower())
 
-    elif source == "pihole":
-        # Only count real "query[...]" lines
-        parsed = parse_pihole_line(line)
-        if not parsed:
-            # reply/forwarded/cached lines: ignore completely
-            return urls, domains
-
-        dom = parsed["domain"].lower()
-        domains.add(dom)
-        # we only care about the domain, there are no URLs in DNS
-        text = dom
-
-    # URLs (for squid payload; for pihole, text is just the domain)
-    for match in URL_RE.findall(text):
-        u = match.strip()
-        if not u:
-            continue
-        urls.add(u)
+    # URLs
+    for match in URL_RE.findall(payload):
+        urls.add(match)
         try:
-            host = urlparse(u).hostname
-            if host:
-                domains.add(host.lower())
-        except Exception:
+            h = urlparse(match).hostname
+            if h:
+                domains.add(h.lower())
+        except:
             pass
 
-    # Bare domains / hostnames (for squid payload)
-    # For pihole, text is already just the domain, so this is harmless
-    for match in DOMAIN_RE.findall(text):
+    # Plain domains
+    for match in DOMAIN_RE.findall(payload):
         domains.add(match.lower())
 
-    return urls, domains
+    return urls, domains, parsed
+
+
+def extract_pihole_indicators(line: str):
+    parsed = parse_pihole_line(line)
+    if not parsed:
+        return None, None, None
+
+    dom = parsed["domain"]
+    return set(), {dom}, parsed
+
 
 # =========================
 # SEARCH
 # =========================
-def search_logs_for_iocs(
-    iocs: Dict[str, Set[str]],
-    squid_lines: List[str],
-    pihole_lines: List[str],
-) -> Dict[str, Dict[str, List[str]]]:
-    """
-    Returns:
-    {
-      "domain:example.com": {"squid":[...], "pihole":[...}},
-      "url:https://evil":  {"squid":[...], "pihole":[...]},
-      ...
-    }
 
-    - Squid: matches BOTH domain and url IoCs (as before)
-    - Pi-hole: matches domain IoCs (no URLs in DNS)
-    """
+def search_logs(iocs, squid_lines, pihole_lines):
+    results = {}
 
-    result: Dict[str, Dict[str, List[str]]] = {}
+    def hit(ioc_key, source, line):
+        results.setdefault(ioc_key, {"squid": [], "pihole": []})
+        results[ioc_key][source].append(line)
 
-    def add_hit(key: str, source: str, line: str):
-        if key not in result:
-            result[key] = {"squid": [], "pihole": []}
-        result[key][source].append(line.strip("\n"))
-
-    # Normalised IoC sets
     ioc_domains = {d.lower() for d in iocs["domains"]}
     ioc_urls = {u.lower() for u in iocs["urls"]}
 
-    # --- Squid: domains + URLs ---
+    # ---- Squid ----
     for line in squid_lines:
-        urls, domains = extract_indicators_from_line(line, "squid")
+        urls, domains, parsed = extract_squid_indicators(line)
+        if not parsed:
+            continue
 
         for d in domains:
             if d in ioc_domains:
-                add_hit(f"domain:{d}", "squid", line)
+                hit(f"domain:{d}", "squid", line)
 
         for u in urls:
             if u.lower() in ioc_urls:
-                add_hit(f"url:{u}", "squid", line)
+                hit(f"url:{u}", "squid", line)
 
-    # --- Pi-hole: domains (no URLs in DNS) ---
+    # ---- Pi-hole ----
     for line in pihole_lines:
-        urls, domains = extract_indicators_from_line(line, "pihole")
+        urls, domains, parsed = extract_pihole_indicators(line)
+        if not parsed:
+            continue
 
         for d in domains:
             if d in ioc_domains:
-                add_hit(f"domain:{d}", "pihole", line)
+                hit(f"domain:{d}", "pihole", line)
 
-    return result
+    return results
 
 
 # =========================
-# PUSH MATCHES TO MISP
+# PUSH TO TWO MISP EVENTS
 # =========================
 
-def push_matches_to_misp(
-    matches: Dict[str, Dict[str, List[str]]],
-    days_back: int,
-) -> None:
-    """
-    For each IoC:
-
-      - URL IoCs:
-          * Aggregate all Squid hits (time + IP)
-          * ONE attribute: type=url, category=Network activity, source=squid
-
-      - Domain IoCs:
-          * Aggregate all Squid hits (time + IP)
-            -> ONE attribute: type=domain, category=Network activity, source=squid
-          * Aggregate all Pi-hole query hits (time + client)
-            -> ONE attribute: type=domain, category=DNS query, source=pihole
-
-    This gives you all activity with timestamps & IPs/clients, without
-    hitting MISP duplicate-attribute 403s.
-    """
+def push_results_to_misp(matches, days_back):
     if not matches:
-        print("[+] No Squid or Pi-hole matches to push to MISP.")
+        print("[+] No matches found, nothing to push.")
         return
 
-    info = (
-        f"Retrohunt matches from Squid/Pi-hole "
-        f"(last {days_back} days IoCs, {datetime.now(timezone.utc).strftime('%Y-%m-%d')})"
+    # --------------------------
+    # Create 2 SEPARATE EVENTS
+    # --------------------------
+    squid_event = create_misp_event(
+        f"Retrohunt Squid URL activity (last {days_back} days)"
     )
-    event_id = create_misp_event(info)
-    if not event_id:
-        print("[!] Cannot push matches to MISP (no event_id).")
+    pihole_event = create_misp_event(
+        f"Retrohunt Pi-hole DNS activity (last {days_back} days)"
+    )
+
+    if not squid_event or not pihole_event:
+        print("[!] Cannot continue without both events.")
         return
 
-    attr_count = 0
+    squid_count = 0
+    pihole_count = 0
 
-    for ioc_key, sources in matches.items():
-        if ":" in ioc_key:
-            ioc_type, raw_value = ioc_key.split(":", 1)
-        else:
-            ioc_type, raw_value = "text", ioc_key
-        raw_value = raw_value.strip()
+    for key, sources in matches.items():
+        ioc_type, value = key.split(":", 1)
 
-        # ---------- URL IoCs -> only Squid ----------
-        if ioc_type == "url":
+        # --------------------------
+        # SQUID EVENT
+        # --------------------------
+        if sources["squid"]:
             squid_hits = []
-            for line in sources.get("squid", []):
-                parsed = parse_squid_line(line)
-                if not parsed:
+            for ln in sources["squid"]:
+                p = parse_squid_line(ln)
+                if not p:
                     continue
-                ts = parsed["timestamp_iso"] or "unknown-time"
-                ip = parsed["client_ip"] or "unknown-ip"
-                squid_hits.append((ts, ip))
+                squid_hits.append(f"- time={p['timestamp']}, ip={p['ip']}")
 
-            if squid_hits:
-                if attr_count >= MAX_ATTRIBUTES_PER_EVENT:
-                    print(
-                        f"[!] Reached MAX_ATTRIBUTES_PER_EVENT "
-                        f"({MAX_ATTRIBUTES_PER_EVENT}), stopping."
-                    )
-                    return
+            comment = f"source=squid\nIoC={value}\nhits:\n" + "\n".join(squid_hits)
 
-                comment_lines = [
-                    f"source=squid, IoC={raw_value}",
-                    "hits:",
-                ]
-                for ts, ip in squid_hits:
-                    comment_lines.append(f"- time={ts}, ip={ip}")
-                comment = "\n".join(comment_lines)
-                if len(comment) > 5000:
-                    comment = comment[:5000] + "\n... (truncated)"
+            if add_attribute(
+                squid_event,
+                "url" if ioc_type == "url" else "domain",
+                value,
+                "Network activity",
+                True,
+                comment
+            ):
+                squid_count += 1
 
-                if add_attribute_to_event(
-                    event_id,
-                    "url",
-                    raw_value,
-                    "Network activity",
-                    True,
-                    comment,
-                ):
-                    attr_count += 1
-
-        # ---------- Domain IoCs -> Squid + Pi-hole ----------
-        elif ioc_type == "domain":
-            # --- Squid side ---
-            squid_hits = []
-            for line in sources.get("squid", []):
-                parsed = parse_squid_line(line)
-                if not parsed:
+        # --------------------------
+        # PI-HOLE EVENT
+        # --------------------------
+        if sources["pihole"]:
+            dns_hits = []
+            for ln in sources["pihole"]:
+                p = parse_pihole_line(ln)
+                if not p:
                     continue
-                ts = parsed["timestamp_iso"] or "unknown-time"
-                ip = parsed["client_ip"] or "unknown-ip"
-                squid_hits.append((ts, ip))
+                dns_hits.append(
+                    f"- time={p['timestamp']}, client={p['client']}, domain={p['domain']}"
+                )
 
-            if squid_hits:
-                if attr_count >= MAX_ATTRIBUTES_PER_EVENT:
-                    print(
-                        f"[!] Reached MAX_ATTRIBUTES_PER_EVENT "
-                        f"({MAX_ATTRIBUTES_PER_EVENT}), stopping."
-                    )
-                    return
+            comment = f"source=pihole\nIoC={value}\nhits:\n" + "\n".join(dns_hits)
 
-                comment_lines = [
-                    f"source=squid, IoC={raw_value}",
-                    "hits:",
-                ]
-                for ts, ip in squid_hits:
-                    comment_lines.append(f"- time={ts}, ip={ip}")
-                comment = "\n".join(comment_lines)
-                if len(comment) > 5000:
-                    comment = comment[:5000] + "\n... (truncated)"
-
-                if add_attribute_to_event(
-                    event_id,
-                    "domain",
-                    raw_value,
-                    "Network activity",
-                    True,
-                    comment,
-                ):
-                    attr_count += 1
-
-            # --- Pi-hole side (DNS queries only) ---
-            pihole_hits = []
-            for line in sources.get("pihole", []):
-                parsed = parse_pihole_line(line)
-                if not parsed:
-                    continue
-                ts = parsed["timestamp_iso"] or "unknown-time"
-                client = parsed["client"]
-                dom = parsed["domain"].lower()
-                pihole_hits.append((ts, client, dom))
-
-            if pihole_hits:
-                if attr_count >= MAX_ATTRIBUTES_PER_EVENT:
-                    print(
-                        f"[!] Reached MAX_ATTRIBUTES_PER_EVENT "
-                        f"({MAX_ATTRIBUTES_PER_EVENT}), stopping."
-                    )
-                    return
-
-                comment_lines = [
-                    f"source=pihole, IoC={raw_value}",
-                    "hits:",
-                ]
-                for ts, client, dom in pihole_hits:
-                    comment_lines.append(
-                        f"- time={ts}, client={client}, domain={dom}"
-                    )
-                comment = "\n".join(comment_lines)
-                if len(comment) > 5000:
-                    comment = comment[:5000] + "\n... (truncated)"
-
-                # category=DNS query to avoid duplicate (type+value+category) with Squid attr
-                if add_attribute_to_event(
-                    event_id,
-                    "domain",
-                    raw_value,
-                    "DNS query",
-                    True,
-                    comment,
-                ):
-                    attr_count += 1
-
-        # other IoC types ignored for now
-
-    print(f"[+] Pushed {attr_count} IoC attributes into MISP event {event_id}")
-
-# =========================
-# LOG PARSING / REPORTING
-# =========================
-
-def load_log_lines(path: str) -> List[str]:
-    if not os.path.exists(path):
-        print(f"[!] Log file not found: {path}", file=sys.stderr)
-        return []
-    try:
-        with open(path, "r", encoding="utf-8", errors="ignore") as f:
-            return f.readlines()
-    except Exception as e:
-        print(f"[!] Failed to read {path}: {e}", file=sys.stderr)
-        return []
+            if add_attribute(
+                pihole_event,
+                "domain",
+                 value,
+                "Network activity",   # valid MISP category
+                True,
+                comment
+            ):
+                pihole_count += 1
 
 
-def print_report(matches: Dict[str, Dict[str, List[str]]], limit_per_ioc: int = 10) -> None:
-    if not matches:
-        print("[+] No matches found in Squid or Pi-hole logs.")
-        return
-
-    print("\n================ RETROHUNT RESULTS ================\n")
-    for ioc_key, sources in sorted(matches.items()):
-        squid_hits = sources.get("squid", [])
-        pihole_hits = sources.get("pihole", [])
-
-        print(f"IoC: {ioc_key}")
-        print(f"  Squid  : {len(squid_hits)} hits")
-        print(f"  Pi-hole: {len(pihole_hits)} hits")
-
-        def print_lines(label: str, lines: List[str]):
-            if not lines:
-                return
-            print(f"  --- Sample {label} lines ---")
-            for line in lines[:limit_per_ioc]:
-                print(f"    {line}")
-            if len(lines) > limit_per_ioc:
-                print(f"    ... ({len(lines) - limit_per_ioc} more)")
-
-        print_lines("Squid", squid_hits)
-        print_lines("Pi-hole", pihole_hits)
-        print("")
-
-
-def write_json_report(matches: Dict[str, Dict[str, List[str]]], out_path: str) -> None:
-    try:
-        with open(out_path, "w", encoding="utf-8") as f:
-            json.dump(matches, f, indent=2)
-        print(f"[+] JSON report written to {out_path}")
-    except Exception as e:
-        print(f"[!] Failed to write JSON report: {e}", file=sys.stderr)
+    print(f"[+] Added {squid_count} attributes to Squid event {squid_event}")
+    print(f"[+] Added {pihole_count} attributes to Pi-hole event {pihole_event}")
 
 
 # =========================
@@ -590,64 +435,28 @@ def write_json_report(matches: Dict[str, Dict[str, List[str]]], out_path: str) -
 # =========================
 
 def parse_args():
-    p = argparse.ArgumentParser(
-        description="Retrohunt MISP IoCs in Squid and Pi-hole logs."
-    )
-    p.add_argument(
-        "--days",
-        type=int,
-        default=DEFAULT_DAYS_BACK,
-        help=f"How many days back to fetch IoCs from MISP (default: {DEFAULT_DAYS_BACK})"
-    )
-    p.add_argument(
-        "--squid-log",
-        default=SQUID_LOG,
-        help=f"Path to Squid access log (default: {SQUID_LOG})"
-    )
-    p.add_argument(
-        "--pihole-log",
-        default=PIHOLE_LOG,
-        help=f"Path to Pi-hole log (default: {PIHOLE_LOG})"
-    )
-    p.add_argument(
-        "--json-out",
-        default=None,
-        help="Optional path to write JSON report with all matches"
-    )
-    p.add_argument(
-        "--limit",
-        type=int,
-        default=10,
-        help="Max log lines per IoC per source to print to stdout (default: 10)"
-    )
+    p = argparse.ArgumentParser("Retrohunt")
+    p.add_argument("--days", type=int, default=DEFAULT_DAYS_BACK)
     return p.parse_args()
 
 
 def main():
     args = parse_args()
 
-    print(f"[+] Fetching IoCs from MISP (last {args.days} days)...")
+    print(f"[+] Fetching IoCs from last {args.days} days…")
     iocs = fetch_iocs_from_misp(args.days)
-    print(
-        f"[+] Got {len(iocs['domains'])} domains/hostnames, "
-        f"{len(iocs['urls'])} URLs from MISP."
-    )
 
-    print(f"[+] Loading Squid log from {args.squid_log}")
-    squid_lines = load_log_lines(args.squid_log)
+    print("[+] Loading rotated Squid logs…")
+    squid_lines = load_rotated_logs(SQUID_LOG)
 
-    print(f"[+] Loading Pi-hole log from {args.pihole_log}")
-    pihole_lines = load_log_lines(args.pihole_log)
+    print("[+] Loading rotated Pi-hole logs…")
+    pihole_lines = load_pihole_logs()
 
-    print("[+] Searching logs for IoCs...")
-    matches = search_logs_for_iocs(iocs, squid_lines, pihole_lines)
+    print("[+] Searching logs for IoCs…")
+    matches = search_logs(iocs, squid_lines, pihole_lines)
 
-    print_report(matches, limit_per_ioc=args.limit)
-
-    if args.json_out:
-        write_json_report(matches, args.json_out)
-
-    push_matches_to_misp(matches, args.days)
+    print("[+] Pushing results into 2 MISP events…")
+    push_results_to_misp(matches, args.days)
 
 
 if __name__ == "__main__":
