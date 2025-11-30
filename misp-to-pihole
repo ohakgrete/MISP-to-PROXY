@@ -8,11 +8,11 @@ from datetime import datetime
 
 # ==== CONFIG ====
 MISP_URL = "https://misp.local"
-MISP_API_KEY = "Need to generate API key from MISP"  # Replace with your actual key
+MISP_API_KEY = "muudamind"  # Replace with your actual key
 PIHOLE_DB_PATH = "/etc/pihole/gravity.db"
 COMMENT_TAG = "Synced from MISP"
 GROUP_ID = 1   # Default Pi-hole group
-TYPE = 1       # Exact blacklist
+TYPE = 1       # Exact blacklist (Pi-hole domainlist type)
 
 # ==== INIT ====
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
@@ -22,8 +22,96 @@ HEADERS = {
     "Content-Type": "application/json"
 }
 
-# ==== QUERY MISP ====
+# -------------------------------------------------
+# WARNINGLIST HANDLING
+# -------------------------------------------------
+
+def fetch_warninglist_domains():
+    """
+    Fetch enabled warninglists from MISP and return
+    a set of domain-like values to *ignore* (whitelist).
+    Domains are stored lowercase, e.g. "google.com".
+    """
+    wl_domains = set()
+    print("[*] Fetching warninglists from MISP...")
+
+    try:
+        r = requests.get(
+            MISP_URL.rstrip("/") + "/warninglists/index.json",
+            headers=HEADERS,
+            verify=False,
+            timeout=60,
+        )
+        r.raise_for_status()
+        data = r.json()
+        wlists = data.get("Warninglists", [])
+    except Exception as e:
+        print(f"[!] Could not fetch warninglists index: {e}")
+        return wl_domains
+
+    enabled_ids = []
+    for item in wlists:
+        w = item.get("Warninglist", {})
+        enabled = w.get("enabled")
+        if enabled is True or str(enabled).lower() == "true":
+            wid = w.get("id")
+            if wid:
+                enabled_ids.append(wid)
+
+    print(f"[+] Warninglists: {len(enabled_ids)} enabled")
+
+    for wid in enabled_ids:
+        try:
+            wr = requests.get(
+                MISP_URL.rstrip("/") + f"/warninglists/view/{wid}.json",
+                headers=HEADERS,
+                verify=False,
+                timeout=60,
+            )
+            wr.raise_for_status()
+            wdata = wr.json()
+        except Exception as e:
+            print(f"[!] Failed to fetch warninglist {wid}: {e}")
+            continue
+
+        # Structure: { "Warninglist": { ..., "WarninglistEntry": [ { "value": ... }, ... ] } }
+        wobj = wdata.get("Warninglist", {})
+        entries = wobj.get("WarninglistEntry", []) or []
+
+        for entry in entries:
+            val = str(entry.get("value", "")).strip().lower()
+            if not val:
+                continue
+
+            # Treat anything that looks like a hostname/domain as domain
+            if "." in val and " " not in val and not val.startswith(("http://", "https://")):
+                wl_domains.add(val)
+
+    print(f"[+] Warninglists collected → {len(wl_domains)} domain(s) to ignore in Pi-hole sync.")
+    return wl_domains
+
+
+def domain_is_whitelisted(dom: str, wl_domains) -> bool:
+    """
+    Return True if dom is in the warninglist domain set, or
+    is a subdomain of a warninglist domain.
+    """
+    d = dom.lower().rstrip(".")
+    for wd in wl_domains:
+        if d == wd:
+            return True
+        if d.endswith("." + wd):
+            return True
+    return False
+
+# -------------------------------------------------
+# QUERY MISP FOR DOMAINS
+# -------------------------------------------------
+
 def fetch_domains_from_misp():
+    # Get warninglist domains first
+    wl_domains = fetch_warninglist_domains()
+
     payload = {
         "returnFormat": "json",
         "type": ["domain", "hostname"],
@@ -32,32 +120,100 @@ def fetch_domains_from_misp():
 
     print("[*] Requesting domain data from MISP...")
     try:
-        response = requests.post(f"{MISP_URL}/attributes/restSearch",
-                                 headers=HEADERS, json=payload, verify=False)
+        response = requests.post(
+            f"{MISP_URL}/attributes/restSearch",
+            headers=HEADERS,
+            json=payload,
+            verify=False,
+            timeout=90,
+        )
         response.raise_for_status()
         data = response.json()
-
-        # Extract attributes
-        attributes = []
-        if "Attribute" in data:
-            attributes = data["Attribute"]
-        elif "response" in data and isinstance(data["response"], dict):
-            attributes = data["response"].get("Attribute", [])
-
-        domains = [
-            attr["value"]
-            for attr in attributes
-             if attr.get("type") in ("domain", "hostname") and attr.get("to_ids", True) is True
-        ]
-
-        print(f"[+] Retrieved {len(domains)} domain(s).")
-        return list(set(domains))  # Deduplicate
-
     except Exception as e:
         print(f"[!] Error querying MISP: {e}")
         return []
 
-# ==== INSERT INTO PIHOLE ====
+    # Extract attributes
+    if "Attribute" in data:
+        attributes = data["Attribute"]
+    elif "response" in data and isinstance(data["response"], dict):
+        attributes = data["response"].get("Attribute", [])
+    else:
+        attributes = []
+
+    raw_domains = []
+    for attr in attributes:
+        if attr.get("type") in ("domain", "hostname") and attr.get("to_ids", True) is True:
+            val = str(attr.get("value", "")).strip()
+            if val:
+                raw_domains.append(val)
+
+    print(f"[+] Retrieved {len(raw_domains)} domain(s) from MISP before warninglist filter.")
+
+    # Deduplicate + apply warninglist filter
+    out = set()
+    skipped = 0
+    for d in set(raw_domains):
+        if domain_is_whitelisted(d, wl_domains):
+            skipped += 1
+            # Uncomment for per-domain debug:
+            # print(f"[WL-warninglist] Skipping domain: {d}")
+            continue
+        out.add(d)
+
+    print(f"[+] After warninglist filter: {len(out)} domain(s) kept, {skipped} skipped.")
+    return list(out)
+
+# -------------------------------------------------
+# CLEAR OLD MISP-SYNCED ENTRIES FROM PI-HOLE
+# -------------------------------------------------
+
+def clear_old_misp_entries():
+    """
+    Remove previous MISP-synced entries from Pi-hole domainlist.
+    We match rows by TYPE and COMMENT_TAG (and group_id if present).
+    """
+    if not os.path.exists(PIHOLE_DB_PATH):
+        print(f"[!] Pi-hole database not found at {PIHOLE_DB_PATH}")
+        return 0
+
+    conn = sqlite3.connect(PIHOLE_DB_PATH)
+    cursor = conn.cursor()
+
+    # Detect schema
+    cursor.execute("PRAGMA table_info(domainlist);")
+    columns = [row[1] for row in cursor.fetchall()]
+    has_group_id = 'group_id' in columns
+
+    before = conn.total_changes
+
+    try:
+        if has_group_id:
+            cursor.execute(
+                "DELETE FROM domainlist "
+                "WHERE type = ? AND comment = ? AND group_id = ?",
+                (TYPE, COMMENT_TAG, GROUP_ID)
+            )
+        else:
+            cursor.execute(
+                "DELETE FROM domainlist "
+                "WHERE type = ? AND comment = ?",
+                (TYPE, COMMENT_TAG)
+            )
+        conn.commit()
+    except Exception as e:
+        print(f"[!] Failed to delete old MISP entries: {e}")
+        conn.rollback()
+
+    deleted = conn.total_changes - before
+    conn.close()
+    print(f"[+] Cleared {deleted} old MISP-synced domain(s) from Pi-hole.")
+    return deleted
+
+# -------------------------------------------------
+# INSERT INTO PI-HOLE
+# -------------------------------------------------
+
 def insert_into_pihole(domains):
     if not os.path.exists(PIHOLE_DB_PATH):
         print(f"[!] Pi-hole database not found at {PIHOLE_DB_PATH}")
@@ -76,12 +232,16 @@ def insert_into_pihole(domains):
         try:
             if has_group_id:
                 cursor.execute(
-                    "INSERT OR IGNORE INTO domainlist (type, domain, enabled, comment, group_id) VALUES (?, ?, 1, ?, ?)",
+                    "INSERT OR IGNORE INTO domainlist "
+                    "(type, domain, enabled, comment, group_id) "
+                    "VALUES (?, ?, 1, ?, ?)",
                     (TYPE, domain, COMMENT_TAG, GROUP_ID)
                 )
             else:
                 cursor.execute(
-                    "INSERT OR IGNORE INTO domainlist (type, domain, enabled, comment) VALUES (?, ?, 1, ?)",
+                    "INSERT OR IGNORE INTO domainlist "
+                    "(type, domain, enabled, comment) "
+                    "VALUES (?, ?, 1, ?)",
                     (TYPE, domain, COMMENT_TAG)
                 )
             added += cursor.rowcount
@@ -92,18 +252,27 @@ def insert_into_pihole(domains):
     conn.close()
     print(f"[+] Successfully added {added} new domain(s) to Pi-hole.")
 
+# -------------------------------------------------
+# MAIN
+# -------------------------------------------------
 
-# ==== MAIN ====
 def main():
     print("===== MISP to Pi-hole Sync =====")
     domains = fetch_domains_from_misp()
-    if domains:
-        insert_into_pihole(domains)
-        print("[*] Reloading Pi-hole DNS...")
-        os.system("sudo pihole -g")
-        print("[+] Sync complete.")
-    else:
+    if not domains:
         print("[!] No domains to process.")
+        return
+
+    # 1) Clear previous MISP-synced entries
+    clear_old_misp_entries()
+
+    # 2) Insert the fresh set
+    insert_into_pihole(domains)
+
+    # 3) Rebuild gravity
+    print("[*] Reloading Pi-hole DNS (pihole -g)...")
+    os.system("sudo pihole -g")
+    print("[+] Sync complete.")
 
 if __name__ == "__main__":
     main()
