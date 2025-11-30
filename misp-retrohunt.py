@@ -21,7 +21,7 @@ urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 # MISP connection
 MISP_URL = "https://misp.local"      # Change if needed
-MISP_API_KEY = "MuudaMind"          # <-- replace and DO NOT commit real key
+MISP_API_KEY = "muudaMind!"          # <-- replace and DO NOT commit real key
 MISP_VERIFY_SSL = False             # Set True if you have proper certs
 
 # Log paths
@@ -58,7 +58,7 @@ def load_rotated_logs(base_path: str) -> List[str]:
     pattern = os.path.join(log_dir, base_name + "*")
     files = sorted(glob.glob(pattern))
 
-    all_lines = []
+    all_lines: List[str] = []
 
     for fpath in files:
         try:
@@ -73,8 +73,9 @@ def load_rotated_logs(base_path: str) -> List[str]:
 
     return all_lines
 
+
 def load_pihole_logs() -> List[str]:
-    lines = []
+    lines: List[str] = []
 
     candidates = [
         "/var/log/pihole/pihole.log",
@@ -93,14 +94,13 @@ def load_pihole_logs() -> List[str]:
 
         try:
             if path.endswith(".gz"):
-                import gzip
                 with gzip.open(path, "rt", encoding="utf-8", errors="ignore") as f:
                     lines.extend(f.readlines())
             else:
                 with open(path, "r", encoding="utf-8", errors="ignore") as f:
                     lines.extend(f.readlines())
         except Exception as e:
-            print(f"[!] Failed to read {path}: {e}")
+            print(f"[!] Failed to read {path}: {e}", file=sys.stderr)
 
     return lines
 
@@ -109,15 +109,135 @@ def load_pihole_logs() -> List[str]:
 # MISP HELPERS
 # =========================
 
-def misp_headers():
+def misp_headers() -> Dict[str, str]:
     return {
         "Authorization": MISP_API_KEY,
         "Accept": "application/json",
         "Content-Type": "application/json"
     }
 
+# -------- WARNINGLIST HANDLING --------
+
+def _extract_wl_entry_values(entry) -> Set[str]:
+    """
+    Extract all string-like values from a WarninglistEntry item.
+    Handles:
+      - value, value1, value2, hostname, regex
+      - list: [ "foo.com", "bar.com", ... ]
+      - nested WarninglistEntry arrays
+    """
+    values: Set[str] = set()
+
+    if isinstance(entry, str):
+        s = entry.strip().lower()
+        if s:
+            values.add(s)
+        return values
+
+    if not isinstance(entry, dict):
+        return values
+
+    for key in ("value", "value1", "value2", "hostname", "regex"):
+        v = entry.get(key)
+        if isinstance(v, str):
+            s = v.strip().lower()
+            if s:
+                values.add(s)
+
+    lst = entry.get("list")
+    if isinstance(lst, list):
+        for item in lst:
+            if isinstance(item, str):
+                s = item.strip().lower()
+                if s:
+                    values.add(s)
+
+    nested = entry.get("WarninglistEntry")
+    if isinstance(nested, list):
+        for sub in nested:
+            values |= _extract_wl_entry_values(sub)
+
+    return values
+
+
+def fetch_warninglist_values() -> Dict[str, Set[str]]:
+    """
+    Returns sets of domains and URLs coming from *enabled* warninglists.
+    These will be used to ignore benign IoCs (e.g., google.com, Tranco, etc.).
+    """
+    ignore_domains: Set[str] = set()
+    ignore_urls: Set[str] = set()
+
+    print("[+] Fetching warninglists from MISP…")
+
+    # 1. Fetch list of warninglists
+    try:
+        r = requests.get(
+            MISP_URL.rstrip("/") + "/warninglists/index.json",
+            headers=misp_headers(),
+            verify=MISP_VERIFY_SSL,
+            timeout=60
+        )
+        r.raise_for_status()
+        data = r.json()
+        wlists = data.get("Warninglists", [])
+    except Exception as e:
+        print(f"[!] Could not fetch warninglists: {e}")
+        return {"domains": ignore_domains, "urls": ignore_urls}
+
+    enabled_ids: List[str] = []
+    for item in wlists:
+        w = item.get("Warninglist", {})
+        enabled = str(w.get("enabled", "")).lower() in ("1", "true")
+        if enabled:
+            wid = w.get("id")
+            if wid is not None:
+                enabled_ids.append(str(wid))
+
+    print(f"[+] Warninglists: {len(enabled_ids)} enabled")
+
+    # 2. Fetch each enabled warninglist's entries
+    for wid in enabled_ids:
+        try:
+            wr = requests.get(
+                MISP_URL.rstrip("/") + f"/warninglists/view/{wid}.json",
+                headers=misp_headers(),
+                verify=MISP_VERIFY_SSL,
+                timeout=60
+            )
+            wr.raise_for_status()
+            wdata = wr.json()
+        except Exception as e:
+            print(f"[!] Failed to fetch warninglist {wid}: {e}")
+            continue
+
+        wl_obj = wdata.get("Warninglist", {})
+        entries = wl_obj.get("WarninglistEntry") or wdata.get("WarninglistEntry") or []
+        if not isinstance(entries, list):
+            continue
+
+        for entry in entries:
+            for val in _extract_wl_entry_values(entry):
+                if not val:
+                    continue
+
+                # URL-type entry
+                if val.startswith("http://") or val.startswith("https://"):
+                    ignore_urls.add(val)
+                    continue
+
+                # Domain-ish entry (contains dot and no scheme)
+                if "." in val and not val.startswith("ip:") and not val.startswith("cidr:"):
+                    ignore_domains.add(val)
+
+    print(f"[+] Warninglists collected → {len(ignore_domains)} domains, {len(ignore_urls)} URLs")
+    return {"domains": ignore_domains, "urls": ignore_urls}
+
+
+# -------- IoC FETCHING (WITHOUT FILTER) --------
+
 def fetch_iocs_from_misp(days_back: int) -> Dict[str, Set[str]]:
-    """Fetch ONLY domains/hostnames and URLs from MISP (last N days)."""
+    """Fetch ONLY domains/hostnames and URLs from MISP (last N days), raw."""
     since_date = (datetime.now(timezone.utc) - timedelta(days=days_back)).strftime(
         "%Y-%m-%d"
     )
@@ -151,7 +271,10 @@ def fetch_iocs_from_misp(days_back: int) -> Dict[str, Set[str]]:
 
     for attr in attributes:
         atype = attr.get("type")
-        value = attr.get("value", "").strip()
+        value = attr.get("value", "")
+        if not isinstance(value, str):
+            continue
+        value = value.strip()
         if not value:
             continue
 
@@ -160,6 +283,7 @@ def fetch_iocs_from_misp(days_back: int) -> Dict[str, Set[str]]:
         elif atype == "url":
             urls.add(value)
 
+    print(f"[+] Raw IoCs from MISP: {len(domains)} domains, {len(urls)} URLs")
     return {"domains": domains, "urls": urls}
 
 
@@ -226,7 +350,7 @@ def parse_squid_line(line: str):
 
     try:
         ts_iso = datetime.fromtimestamp(float(ts_str), timezone.utc).isoformat()
-    except:
+    except Exception:
         ts_iso = "unknown"
 
     return {
@@ -253,7 +377,7 @@ def parse_pihole_line(line: str):
             "%Y %b %d %H:%M:%S"
         )
         ts_iso = dt.isoformat()
-    except:
+    except Exception:
         ts_iso = "unknown"
 
     return {
@@ -261,6 +385,7 @@ def parse_pihole_line(line: str):
         "domain": m.group("domain").lower(),
         "client": m.group("client")
     }
+
 
 # =========================
 # IoC EXTRACTION
@@ -271,15 +396,15 @@ def extract_squid_indicators(line: str):
     if not parsed:
         return set(), set(), None
 
-    urls = set()
-    domains = set()
+    urls: Set[str] = set()
+    domains: Set[str] = set()
 
     payload = parsed["payload"]
     method = parsed["method"]
 
     # CONNECT www.evil.com:443
     if method == "CONNECT" and "://" not in payload:
-        domains.add(payload.split(":")[0].lower())
+        domains.add(payload.split(":", 1)[0].lower())
 
     # URLs
     for match in URL_RE.findall(payload):
@@ -288,7 +413,7 @@ def extract_squid_indicators(line: str):
             h = urlparse(match).hostname
             if h:
                 domains.add(h.lower())
-        except:
+        except Exception:
             pass
 
     # Plain domains
@@ -312,7 +437,7 @@ def extract_pihole_indicators(line: str):
 # =========================
 
 def search_logs(iocs, squid_lines, pihole_lines):
-    results = {}
+    results: Dict[str, Dict[str, List[str]]] = {}
 
     def hit(ioc_key, source, line):
         results.setdefault(ioc_key, {"squid": [], "pihole": []})
@@ -418,13 +543,12 @@ def push_results_to_misp(matches, days_back):
             if add_attribute(
                 pihole_event,
                 "domain",
-                 value,
+                value,
                 "Network activity",   # valid MISP category
                 True,
                 comment
             ):
                 pihole_count += 1
-
 
     print(f"[+] Added {squid_count} attributes to Squid event {squid_event}")
     print(f"[+] Added {pihole_count} attributes to Pi-hole event {pihole_event}")
@@ -439,12 +563,56 @@ def parse_args():
     p.add_argument("--days", type=int, default=DEFAULT_DAYS_BACK)
     return p.parse_args()
 
-
 def main():
     args = parse_args()
 
     print(f"[+] Fetching IoCs from last {args.days} days…")
     iocs = fetch_iocs_from_misp(args.days)
+
+    print("[+] Fetching warninglists from MISP to ignore benign IoCs…")
+    wl = fetch_warninglist_values()
+    wl_domains = wl["domains"]
+    wl_urls = wl["urls"]
+
+    before_d = len(iocs["domains"])
+    before_u = len(iocs["urls"])
+
+    # --- filter domains (exact + subdomain matches) ---
+    filtered_domains: Set[str] = set()
+    for d in iocs["domains"]:
+        d_low = d.lower()
+        skip = False
+
+        if d_low in wl_domains:
+            skip = True
+        else:
+            for wd in wl_domains:
+                if d_low.endswith("." + wd) or d_low == wd:
+                    skip = True
+                    break
+
+        if not skip:
+            filtered_domains.add(d)
+
+    iocs["domains"] = filtered_domains
+
+        # --- filter URLs: ONLY exact warninglist URL matches are ignored ---
+    filtered_urls: Set[str] = set()
+    for u in iocs["urls"]:
+        u_low = u.lower()
+        # ignore only if the full URL itself is on a warninglist
+        if u_low in wl_urls:
+            continue
+        filtered_urls.add(u)
+
+    iocs["urls"] = filtered_urls
+
+
+    print(
+        f"[+] After warninglist filter: "
+        f"{before_d} domains → {len(iocs['domains'])}, "
+        f"{before_u} URLs → {len(iocs['urls'])}"
+    )
 
     print("[+] Loading rotated Squid logs…")
     squid_lines = load_rotated_logs(SQUID_LOG)
@@ -452,10 +620,10 @@ def main():
     print("[+] Loading rotated Pi-hole logs…")
     pihole_lines = load_pihole_logs()
 
-    print("[+] Searching logs for IoCs…")
+    print("[+] Searching logs…")
     matches = search_logs(iocs, squid_lines, pihole_lines)
 
-    print("[+] Pushing results into 2 MISP events…")
+    print("[+] Pushing results to MISP…")
     push_results_to_misp(matches, args.days)
 
 
