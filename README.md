@@ -74,6 +74,15 @@ Click on the balck button with white arrow down, will see the Green box pop up
 Click on the Home button and make sure you have some events
 ![image](https://github.com/user-attachments/assets/19dd9c26-5db6-46f3-af30-5ff5c700201f)
 
+### Enable Warninglists to prevent false positives (optional- all scripts run slower, 1min per script)
+Go to Input Filters -> Warninglists
+
+<img width="1120" height="511" alt="Screenshot 2025-12-01 at 23 46 27" src="https://github.com/user-attachments/assets/cfdba050-1321-464d-b8f7-399cfc8927dd" />
+
+Enable Warninglist, for example "Top 10K most-used sites from Tranco" (https://tranco-list.eu) and press "play button" aka enable
+
+<img width="1489" height="855" alt="Screenshot 2025-12-01 at 23 49 20" src="https://github.com/user-attachments/assets/8ae3c181-e3ff-4099-8292-e4bc0109961c" />
+
 
 
  ## Run misp-to-pihole.py
@@ -173,20 +182,6 @@ After script, in the output visible: 2 new events- one for Squid and one for Pi-
 
 Results are visible under those events, notified that potentially malicious urls were clicked
 
-
- ## Run dns_test.py - to measure performance
-Dowmload the script:
- ```bash
-chmod +x dns_test.py
-./dns_test.py
- ```
-Clean the database if needed:
-```
-sudo sqlite3 /etc/pihole/gravity.db "DELETE FROM domainlist"
-```
-![image](https://github.com/user-attachments/assets/32222afb-0ccd-42f6-aa89-fccb9222f765)
-Run script and then load blocked domains again to database:
-![image](https://github.com/user-attachments/assets/d05948ef-42b3-48f0-9449-1520f974cd53)
 
  
  ## References & Further Reading
