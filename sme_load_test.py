@@ -23,12 +23,18 @@ Notes:
 - For DNS we can either:
     A) use Python UDP resolver to Pi-hole (fast)
     B) spawn nslookup (slower, but mimics your existing test)
+
+Fixes:
+- UDP DNS mode now *parses DNS answers* instead of searching for 00 00 00 00.
+  This prevents "everything blocked" false positives.
+- UDP DNS failures are no longer treated as "blocked" automatically; they count as errors.
 """
 
 import argparse
 import os
 import random
 import socket
+import struct
 import statistics
 import subprocess
 import threading
@@ -88,6 +94,8 @@ class DeviceStats:
     bad_http_blocked: int = 0
 
     errors: int = 0
+    dns_errors: int = 0
+    http_errors: int = 0
 
 
 # --------- Helpers ---------
@@ -180,53 +188,123 @@ def run_nslookup(dns_server: str, domain: str) -> Tuple[float, bool]:
     blocked = ("0.0.0.0" in out) or ("\nAddress: ::\n" in out)
     return t1 - t0, blocked
 
+
+def _encode_qname(name: str) -> bytes:
+    name = name.strip(".")
+    parts = name.split(".") if name else []
+    out = b""
+    for p in parts:
+        b = p.encode("idna")
+        if len(b) > 63:
+            raise ValueError("DNS label too long")
+        out += bytes([len(b)]) + b
+    return out + b"\x00"
+
+def _skip_name(msg: bytes, off: int) -> int:
+    """
+    Skip a DNS name (handles compression pointers).
+    Returns new offset *after* the name field.
+    """
+    while True:
+        if off >= len(msg):
+            raise ValueError("DNS name out of bounds")
+        ln = msg[off]
+        # compression pointer
+        if ln & 0xC0 == 0xC0:
+            if off + 1 >= len(msg):
+                raise ValueError("DNS pointer out of bounds")
+            return off + 2
+        if ln == 0:
+            return off + 1
+        off += 1 + ln
+
 def run_udp_dns_query(dns_server: str, domain: str, timeout: float = 2.0) -> Tuple[float, bool]:
     """
-    Lightweight UDP DNS A query. We treat reply with A=0.0.0.0 as blocked.
-    This is not a full resolver; it's a minimal query for performance testing.
+    Correct UDP DNS query (A + AAAA) that parses answers.
+
+    Blocked=True only if:
+      - any A record == 0.0.0.0
+      - or any AAAA record == ::
     """
-    # Build minimal DNS query (A record)
-    # Transaction ID
-    tid = random.randrange(0, 65536)
-    flags = 0x0100  # standard query, recursion desired
-    qdcount = 1
-    ancount = nscount = arcount = 0
-    header = tid.to_bytes(2, "big") + flags.to_bytes(2, "big") + qdcount.to_bytes(2, "big") + ancount.to_bytes(2, "big") + nscount.to_bytes(2, "big") + arcount.to_bytes(2, "big")
+    domain = (domain or "").strip()
+    if not domain:
+        return 0.0, False
 
-    def enc_name(name: str) -> bytes:
-        parts = name.strip(".").split(".")
-        out = b""
-        for p in parts:
-            out += bytes([len(p)]) + p.encode("utf-8", "ignore")
-        return out + b"\x00"
+    def _query(qtype: int) -> Tuple[List[str], float]:
+        txid = random.randrange(0, 65536)
+        flags = 0x0100  # recursion desired
+        header = struct.pack("!HHHHHH", txid, flags, 1, 0, 0, 0)
+        qname = _encode_qname(domain)
+        question = qname + struct.pack("!HH", qtype, 1)  # QCLASS IN
+        pkt = header + question
 
-    qname = enc_name(domain)
-    qtype = (1).to_bytes(2, "big")   # A
-    qclass = (1).to_bytes(2, "big")  # IN
-    packet = header + qname + qtype + qclass
-
-    t0 = time.monotonic()
-    blocked = False
-    try:
         sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         sock.settimeout(timeout)
-        sock.sendto(packet, (dns_server, 53))
-        data, _ = sock.recvfrom(4096)
-        t1 = time.monotonic()
-
-        # Extremely naive answer parse: just search for 0.0.0.0 in RDATA of A records.
-        # 0.0.0.0 bytes = 00 00 00 00
-        if b"\x00\x00\x00\x00" in data:
-            blocked = True
-        return (t1 - t0), blocked
-    except Exception:
-        t1 = time.monotonic()
-        return (t1 - t0), True  # treat failures as "blocked/unresolved" for safety
-    finally:
         try:
+            t0 = time.monotonic()
+            sock.sendto(pkt, (dns_server, 53))
+            resp, _ = sock.recvfrom(4096)
+            t1 = time.monotonic()
+        finally:
             sock.close()
-        except Exception:
-            pass
+
+        if len(resp) < 12:
+            raise ValueError("short DNS response")
+
+        rid, rflags, qd, an, ns, ar = struct.unpack("!HHHHHH", resp[:12])
+        if rid != txid:
+            raise ValueError("txid mismatch")
+        rcode = rflags & 0x000F
+        if rcode != 0:
+            # NXDOMAIN/SERVFAIL/etc -> not "blocked" by policy
+            return [], (t1 - t0)
+
+        off = 12
+
+        # skip questions
+        for _ in range(qd):
+            off = _skip_name(resp, off)
+            off += 4
+
+        answers: List[str] = []
+        for _ in range(an):
+            off = _skip_name(resp, off)
+            if off + 10 > len(resp):
+                raise ValueError("RR header OOB")
+            rtype, rclass, rttl, rdlen = struct.unpack("!HHIH", resp[off:off+10])
+            off += 10
+            if off + rdlen > len(resp):
+                raise ValueError("RDATA OOB")
+            rdata = resp[off:off+rdlen]
+            off += rdlen
+
+            if rclass != 1:
+                continue
+            if rtype == 1 and rdlen == 4:
+                answers.append(socket.inet_ntop(socket.AF_INET, rdata))
+            elif rtype == 28 and rdlen == 16:
+                answers.append(socket.inet_ntop(socket.AF_INET6, rdata))
+
+        return answers, (t1 - t0)
+
+    # Query A then AAAA
+    t0 = time.monotonic()
+    blocked = False
+
+    a_ans, a_lat = _query(1)
+    if "0.0.0.0" in a_ans:
+        blocked = True
+
+    if not blocked:
+        aaaa_ans, aaaa_lat = _query(28)
+        if "::" in aaaa_ans or "0:0:0:0:0:0:0:0" in aaaa_ans:
+            blocked = True
+    else:
+        aaaa_lat = 0.0
+
+    t1 = time.monotonic()
+    # latency returned as total wall time, not sum of per-query (close enough)
+    return (t1 - t0), blocked
 
 
 # --------- HTTP via proxy ---------
@@ -272,7 +350,6 @@ def cpu_burn(stop_event: threading.Event, target_util: float):
     """
     if target_util <= 0:
         return
-    # Simple duty cycle loop
     period = 0.1  # seconds
     busy = period * (target_util / 100.0)
     idle = max(0.0, period - busy)
@@ -286,7 +363,6 @@ def cpu_burn(stop_event: threading.Event, target_util: float):
 def alloc_memory(megabytes: int) -> Optional[bytearray]:
     if megabytes <= 0:
         return None
-    # Allocate and touch memory so it's committed
     b = bytearray(megabytes * 1024 * 1024)
     step = 4096
     for i in range(0, len(b), step):
@@ -312,7 +388,6 @@ def simulate_device(
     curl_verify_tls: bool,
 ):
     rng = random.Random(ident.device_id * 1337 + int(time.time()))
-    # Note: we don't actually change source IP/MAC at network level; this is "logical" identity for reporting/log analysis.
 
     for i in range(requests_per_device):
         use_bad = (rng.random() < bad_fraction)
@@ -326,12 +401,13 @@ def simulate_device(
             url = rng.choice(GOOD_URLS)
             is_good = True
 
+        # DNS
         try:
-            # DNS
             if use_nslookup:
                 dns_latency, dns_blocked = run_nslookup(dns_server, domain)
             else:
                 dns_latency, dns_blocked = run_udp_dns_query(dns_server, domain)
+
             stats.dns_latencies.append(dns_latency)
             stats.dns_total += 1
             if dns_blocked:
@@ -345,8 +421,14 @@ def simulate_device(
                 stats.bad_dns_total += 1
                 if dns_blocked:
                     stats.bad_dns_blocked += 1
+        except Exception:
+            stats.errors += 1
+            stats.dns_errors += 1
+            # Do not mark "blocked" on errors; it's a resolver failure, not policy.
+            # Still continue to HTTP to keep load pattern.
 
-            # HTTPS via proxy
+        # HTTPS via proxy
+        try:
             http_latency, http_blocked = run_curl(proxy, url, ident.user_agent, verify_tls=curl_verify_tls)
             stats.http_latencies.append(http_latency)
             stats.http_total += 1
@@ -361,15 +443,13 @@ def simulate_device(
                 stats.bad_http_total += 1
                 if http_blocked:
                     stats.bad_http_blocked += 1
-
         except Exception:
             stats.errors += 1
+            stats.http_errors += 1
 
         # Think time + burstiness
-        if burst > 1:
-            if (i + 1) % burst == 0:
-                # longer pause after a burst
-                time.sleep(rng.uniform(0.2, 1.0))
+        if burst > 1 and (i + 1) % burst == 0:
+            time.sleep(rng.uniform(0.2, 1.0))
         if think_ms_max > 0:
             ms = rng.randint(think_ms_min, think_ms_max) if think_ms_max >= think_ms_min else think_ms_min
             time.sleep(ms / 1000.0)
@@ -395,14 +475,8 @@ def monitor_system(stop_event: threading.Event, interval_s: float):
         la = read_proc_loadavg()
         la_s = f"{la[0]:.2f} {la[1]:.2f} {la[2]:.2f}" if la else "n/a"
 
-        if cpu_pct is None:
-            cpu_s = "n/a"
-        else:
-            cpu_s = f"{cpu_pct:.1f}%"
-        if mem_pct is None:
-            mem_s = "n/a"
-        else:
-            mem_s = f"{mem_pct:.1f}%"
+        cpu_s = "n/a" if cpu_pct is None else f"{cpu_pct:.1f}%"
+        mem_s = "n/a" if mem_pct is None else f"{mem_pct:.1f}%"
 
         print(f"[MON] cpu={cpu_s} mem={mem_s} loadavg={la_s}", flush=True)
         time.sleep(interval_s)
@@ -424,6 +498,8 @@ def print_summary(all_stats: List[DeviceStats], elapsed_s: float):
     bad_http_total = bad_http_blocked = 0
 
     errors = 0
+    dns_errors = 0
+    http_errors = 0
 
     for s in all_stats:
         all_dns.extend(s.dns_latencies)
@@ -444,13 +520,15 @@ def print_summary(all_stats: List[DeviceStats], elapsed_s: float):
         bad_http_blocked += s.bad_http_blocked
 
         errors += s.errors
+        dns_errors += s.dns_errors
+        http_errors += s.http_errors
 
     print("\n===== RUN SUMMARY =====")
     print(f"Elapsed: {elapsed_s:.2f}s")
     if elapsed_s > 0:
         print(f"Throughput (DNS):  {dns_total/elapsed_s:.2f} qps")
         print(f"Throughput (HTTP): {http_total/elapsed_s:.2f} rps")
-    print(f"Errors: {errors}\n")
+    print(f"Errors: {errors} (dns={dns_errors}, http={http_errors})\n")
 
     print("===== DNS Performance =====\n")
     fmt_stats(all_dns, "DNS latency")
@@ -460,6 +538,8 @@ def print_summary(all_stats: List[DeviceStats], elapsed_s: float):
         print(f"  blocked             = {dns_blocked} ({dns_blocked/dns_total*100:.2f}%)")
         print(f"  good queries        = {good_dns_total} (blocked: {good_dns_blocked})")
         print(f"  bad  queries        = {bad_dns_total} (blocked: {bad_dns_blocked})")
+        if dns_errors:
+            print(f"  dns errors          = {dns_errors}")
     print()
 
     print("===== HTTPS via Proxy Performance =====\n")
@@ -470,6 +550,8 @@ def print_summary(all_stats: List[DeviceStats], elapsed_s: float):
         print(f"  blocked             = {http_blocked} ({http_blocked/http_total*100:.2f}%)")
         print(f"  good requests       = {good_http_total} (blocked: {good_http_blocked})")
         print(f"  bad  requests       = {bad_http_total} (blocked: {bad_http_blocked})")
+        if http_errors:
+            print(f"  http errors         = {http_errors}")
     print()
 
 
@@ -513,20 +595,18 @@ def main():
     print(f"    ramp-up(s)       = {args.ramp_up}")
     print(f"    cpu-load/device  = {args.cpu_load}%")
     print(f"    mem-mb/device    = {args.mem_mb}")
-    print(f"    dns mode         = {'nslookup' if args.use_nslookup else 'udp-minimal'}")
+    print(f"    dns mode         = {'nslookup' if args.use_nslookup else 'udp-parsed'}")
     print(f"    curl TLS verify  = {args.curl_verify_tls}")
     if args.monitor_interval > 0:
         print(f"    monitor interval = {args.monitor_interval}s")
     print()
 
-    # Monitoring
     stop_mon = threading.Event()
     mon_thread = None
     if args.monitor_interval and args.monitor_interval > 0:
         mon_thread = threading.Thread(target=monitor_system, args=(stop_mon, args.monitor_interval), daemon=True)
         mon_thread.start()
 
-    # Start devices
     threads = []
     stats_list: List[DeviceStats] = []
     stop_cpu = []
@@ -543,10 +623,8 @@ def main():
             user_agent=f"SME-Endpoint/{i} ({os.uname().sysname})",
         )
 
-        # optional per-device mem load
         mem_holders.append(alloc_memory(args.mem_mb))
 
-        # optional per-device cpu burn thread
         cpu_stop = threading.Event()
         stop_cpu.append(cpu_stop)
         if args.cpu_load and args.cpu_load > 0:
@@ -576,7 +654,6 @@ def main():
         )
         threads.append(t)
 
-        # ramp-up control
         if args.ramp_up and args.ramp_up > 0 and args.devices > 1:
             delay = args.ramp_up / args.devices
             time.sleep(delay)
@@ -588,7 +665,6 @@ def main():
 
     end = time.monotonic()
 
-    # Stop CPU burners + monitor
     for ev in stop_cpu:
         ev.set()
     stop_mon.set()
