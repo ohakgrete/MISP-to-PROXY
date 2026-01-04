@@ -268,7 +268,7 @@ EOF
     say "Generating new v3 CA for Squid bump…"
     rm -f "${CA_KEY}" "${CA_CRT}" || true
     openssl genrsa -out "${CA_KEY}" 4096
-    openssl req -x509 -new -nodes -key "${CA_KEY}" -sha256 -days 3650 \
+    openssl req -x509 -new -nodes -key "${CA_KEY}" -sha256 -days 365 \ # for prototyping 1 year should be OK
       -out "${CA_CRT}" -config "${OPENSSL_CONF}" -extensions v3_ca
   fi
 
@@ -278,7 +278,7 @@ EOF
   openssl req -new -key "${SERVER_KEY}" -out "${SERVER_CSR}" \
     -subj "/C=${ORG_COUNTRY}/ST=${ORG_STATE}/L=${ORG_LOCALITY}/O=${ORG_NAME}/OU=${ORG_UNIT}/CN=${SERVER_CN}"
   openssl x509 -req -in "${SERVER_CSR}" -CA "${CA_CRT}" -CAkey "${CA_KEY}" -CAcreateserial \
-    -out "${SERVER_CRT}" -days 3650 -sha256 -extfile "${OPENSSL_CONF}" -extensions server_cert
+    -out "${SERVER_CRT}" -days 365 -sha256 -extfile "${OPENSSL_CONF}" -extensions server_cert # for prototyping 1 year should be OK
 
   chown -R "${SQUID_USER}:${SQUID_GROUP}" "${CA_DIR}" || true
   chmod 600 "${CA_KEY}" "${SERVER_KEY}" || true
